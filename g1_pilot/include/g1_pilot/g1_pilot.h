@@ -3,6 +3,7 @@
 
 #include <Eigen/Dense>
 #include <map>
+#include <memory>
 
 namespace HumanoidPilot {
 
@@ -11,6 +12,22 @@ struct JointState {
     std::vector<double> position;
     std::vector<double> velocity;
     std::vector<double> effort;
+};
+
+/**
+ * @brief A time-parameterised joint-space trajectory, sampled at a constant
+ * time_step so no explicit time stamps are needed.
+ *
+ * position/velocity/acceleration are indexed [joint][sample]: the outer index
+ * matches name, the inner index is the sample number, so each inner vector is
+ * one joint's trajectory.
+ */
+struct JointTrajectory {
+    std::vector<std::string> name;
+    std::vector<std::vector<double>> position;
+    std::vector<std::vector<double>> velocity;
+    std::vector<std::vector<double>> acceleration;
+    double time_step = 0.0;
 };
 
 struct RobotConfig {
@@ -107,21 +124,18 @@ public:
         const Eigen::VectorXd* goal_acc = nullptr
     );
 
-    std::pair<
-    std::vector<Eigen::VectorXd>,
-    std::vector<Eigen::MatrixXd>>
+    JointTrajectory
     planTrajectory(
         const Eigen::MatrixXd* goal_pose,
         const Eigen::MatrixXd* start_pose = nullptr,
-        const Eigen::VectorXd* start_vel = nullptr,
-        const Eigen::VectorXd* goal_vel = nullptr,
-        const Eigen::VectorXd* start_acc = nullptr,
-        const Eigen::VectorXd* goal_acc = nullptr,
-        double time_step = 0.1,
-        const double MAX_LIN_VEL = 0.1,
-        const double MAX_ANG_VEL = 4.0,
-        const double MAX_LIN_ACC = 0.05,
-        const double MAX_ANG_ACC = 4.0
+        double time_step = 0.01,
+        double max_joint_vel = 1.0,
+        double max_joint_acc = 2.0
+    );
+
+    Eigen::MatrixXd forward_kinematics(
+        const Eigen::VectorXd& q,
+        const bool left = false
     );
 
 protected:

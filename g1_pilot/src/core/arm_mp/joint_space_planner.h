@@ -5,16 +5,6 @@
 
 #include <memory>
 
-namespace ompl {
-namespace base {
-class StateSpace;
-class SpaceInformation;
-}
-namespace geometric {
-class RRTstar;
-}
-}
-
 namespace HumanoidPilot {
 
 /**
@@ -42,54 +32,56 @@ class JointSpacePlanner {
         virtual ~JointSpacePlanner();
 
         /**
-         * @param goal_pose  4x4 SE(3) goal end-effector pose
-         * @param start_pose 4x4 SE(3) start end-effector pose (nullptr -> identity)
-         * Velocity/acceleration arguments are accepted for interface parity
-         * but ignored (RRT* is kinematic).
+         * @param goal_pose       4x4 SE(3) goal end-effector pose
+         * @param start_pose      4x4 SE(3) start end-effector pose
+         * @param time_step       output sampling period (s)
+         * @param max_joint_vel   joint velocity bound (rad/s), all joints
+         * @param max_joint_acc   joint acceleration bound (rad/s^2), all joints
+         *
+         * The RRT* path is fitted with a C2 cubic spline and time-optimally
+         * parameterised against the two bounds, then sampled at time_step.
          */
-        virtual std::pair<
-        std::vector<Eigen::VectorXd>,
-        std::vector<Eigen::MatrixXd>>
+        virtual JointTrajectory
         planTrajectory(
             const Eigen::MatrixXd& goal_pose,
             const Eigen::MatrixXd& start_pose,
-            const Eigen::VectorXd* start_vel = nullptr,
-            const Eigen::VectorXd* goal_vel = nullptr,
-            const Eigen::VectorXd* start_acc = nullptr,
-            const Eigen::VectorXd* goal_acc = nullptr,
-            double time_step = 0.1,
-            const double MAX_LIN_VEL = 0.1,
-            const double MAX_ANG_VEL = 4.0,
-            const double MAX_LIN_ACC = 0.05,
-            const double MAX_ANG_ACC = 4.0
+            double time_step = 0.01,
+            double max_joint_vel = 1.0,
+            double max_joint_acc = 2.0
         );
 
-        virtual std::pair<
-        std::vector<Eigen::VectorXd>,
-        std::vector<Eigen::MatrixXd>>
+        virtual JointTrajectory
         planTrajectory(
             const JointState& start_state,
             const Eigen::MatrixXd& goal_pose,
-            const Eigen::VectorXd* goal_vel = nullptr,
-            const Eigen::VectorXd* goal_acc = nullptr,
-            double time_step = 0.1,
-            const double MAX_LIN_VEL = 0.1,
-            const double MAX_ANG_VEL = 4.0,
-            const double MAX_LIN_ACC = 0.05,
-            const double MAX_ANG_ACC = 4.0
+            double time_step = 0.01,
+            double max_joint_vel = 1.0,
+            double max_joint_acc = 2.0
+        );
+
+        virtual JointTrajectory
+        planTrajectory(
+            const JointState& start_state,
+            const JointState& goal_state,
+            double time_step = 0.01,
+            double max_joint_vel = 1.0,
+            double max_joint_acc = 2.0
         );
 
         virtual std::pair<
         std::vector<Eigen::VectorXd>,
         std::vector<Eigen::MatrixXd>>
-        planTrajectory(
+        planPath(
+            const Eigen::MatrixXd& goal_pose,
+            const Eigen::MatrixXd& start_pose
+        );
+
+        virtual std::pair<
+        std::vector<Eigen::VectorXd>,
+        std::vector<Eigen::MatrixXd>>
+        planPath(
             const JointState& start_state,
-            const JointState& goal_state,
-            double time_step = 0.1,
-            const double MAX_LIN_VEL = 0.1,
-            const double MAX_ANG_VEL = 4.0,
-            const double MAX_LIN_ACC = 0.05,
-            const double MAX_ANG_ACC = 4.0
+            const Eigen::MatrixXd& goal_pose
         );
 
         std::vector<Eigen::VectorXd>
@@ -101,13 +93,17 @@ class JointSpacePlanner {
         void setLeftArm(bool left_arm) { left_arm_ = left_arm; }
 
     protected:
-        std::vector<Eigen::VectorXd> runRRTStar(
+        bool runRRTStar(
             const Eigen::VectorXd& start_q,
-            const Eigen::VectorXd& goal_q
+            const Eigen::VectorXd& goal_q,
+            std::vector<Eigen::VectorXd>& path
         );
 
-        std::vector<Eigen::VectorXd> resamplePath(
-            const std::vector<Eigen::VectorXd>& waypoints, int steps
+        JointTrajectory timeParameterize(
+            const std::vector<Eigen::VectorXd>& waypoints,
+            double time_step,
+            double max_joint_vel,
+            double max_joint_acc
         );
 
         JointState poseToJointConfig(
@@ -120,7 +116,7 @@ class JointSpacePlanner {
         );
 
         struct RRTData;
-        std::unique_ptr<RRTData> rrt;
+        std::unique_ptr<RRTData> rrt_;
 
         pinocchio::Model model_;
         pinocchio::Data data_;
@@ -138,11 +134,12 @@ class JointSpacePlanner {
         double goal_tolerance_;
         double validity_resolution_;
 
-        
-
         Eigen::VectorXd start_q_;
         Eigen::VectorXd goal_q_;
         std::vector<Eigen::VectorXd> waypoints_;
+
+        std::vector<std::string> joint_names_;
+        std::vector<int> joint_q_index_;
 };
 
 } // namespace HumanoidPilot

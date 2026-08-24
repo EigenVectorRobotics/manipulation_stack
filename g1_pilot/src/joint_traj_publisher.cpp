@@ -147,8 +147,16 @@ private:
             return;
         }
 
-        auto [joint_traj, cart_traj] = arm_->planTrajectory(
+        auto joint_trajectory = arm_->planTrajectory(
             &goal_matrix, &start_matrix);
+
+        std::vector<Eigen::VectorXd> joint_traj = toJointConfigs(joint_trajectory);
+
+        std::vector<Eigen::MatrixXd> cart_traj;
+        cart_traj.reserve(joint_traj.size());
+        for (const auto& q : joint_traj) {
+            cart_traj.push_back(arm_->forward_kinematics(q, left_arm_));
+        }
 
         if (joint_traj.empty()) {
             RCLCPP_ERROR(this->get_logger(),

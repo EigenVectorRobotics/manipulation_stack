@@ -153,18 +153,26 @@ private:
 
         // arm_handle_->setLeftArm(request->left_arm);
 
-        auto [joint_traj, trajectory] = arm_handle_->planTrajectory(
+        auto joint_trajectory = arm_handle_->planTrajectory(
                 &goal_matrix, &start_matrix);
 
-        if (trajectory.empty()) {
+        std::vector<Eigen::VectorXd> joint_traj = toJointConfigs(joint_trajectory);
+
+        if (joint_traj.empty()) {
             RCLCPP_ERROR(this->get_logger(),
                 "Trajectory planning failed: empty trajectory (likely IK error exceeded threshold)");
             response->success = false;
             return;
         }
 
+        std::vector<Eigen::MatrixXd> trajectory;
+        trajectory.reserve(joint_traj.size());
+        for (const auto& q : joint_traj) {
+            trajectory.push_back(arm_handle_->forward_kinematics(q, request->left_arm));
+        }
+
         response->success = true;
-        response->trajectory = convertToTrajectory(joint_traj, arm_handle_->get_joint_names(), "pelvis", this->get_clock()->now());
+        response->trajectory = convertToTrajectory(joint_trajectory, "pelvis", this->get_clock()->now());
 
         path_pub_->publish(convertToPath(trajectory, "pelvis", this->get_clock()->now()));
 

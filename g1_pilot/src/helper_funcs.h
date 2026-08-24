@@ -9,6 +9,8 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <builtin_interfaces/msg/time.hpp>
 #include <rclcpp/clock.hpp>
+#include <rclcpp/duration.hpp>
+#include <g1_pilot/g1_pilot.h>
 #include <stdio.h>
 
 inline Eigen::Matrix4d create_se3(const Eigen::Quaterniond &q, const Eigen::Vector3d &t)
@@ -55,6 +57,57 @@ inline nav_msgs::msg::Path convertToPath(const std::vector<Eigen::MatrixXd>& pos
 
     return path;
 };
+
+inline std::vector<Eigen::VectorXd> toJointConfigs(
+    const HumanoidPilot::JointTrajectory& traj)
+{
+    std::vector<Eigen::VectorXd> configs;
+    if (traj.position.empty()) return configs;
+
+    const std::size_t n_joints = traj.position.size();
+    const std::size_t n_samples = traj.position.front().size();
+    configs.reserve(n_samples);
+
+    for (std::size_t k = 0; k < n_samples; ++k) {
+        Eigen::VectorXd q(n_joints);
+        for (std::size_t j = 0; j < n_joints; ++j) q(j) = traj.position[j][k];
+        configs.push_back(std::move(q));
+    }
+    return configs;
+}
+
+inline trajectory_msgs::msg::JointTrajectory convertToTrajectory(
+    const HumanoidPilot::JointTrajectory& traj,
+    const std::string& frame_id,
+    const rclcpp::Time& stamp)
+{
+    trajectory_msgs::msg::JointTrajectory out;
+    out.header.frame_id = frame_id;
+    out.header.stamp = stamp;
+    out.joint_names = traj.name;
+
+    if (traj.position.empty()) return out;
+
+    const std::size_t n_joints = traj.position.size();
+    const std::size_t n_samples = traj.position.front().size();
+    out.points.reserve(n_samples);
+
+    for (std::size_t k = 0; k < n_samples; ++k) {
+        trajectory_msgs::msg::JointTrajectoryPoint point;
+        point.positions.resize(n_joints);
+        point.velocities.resize(n_joints);
+        point.accelerations.resize(n_joints);
+        for (std::size_t j = 0; j < n_joints; ++j) {
+            point.positions[j] = traj.position[j][k];
+            point.velocities[j] = traj.velocity[j][k];
+            point.accelerations[j] = traj.acceleration[j][k];
+        }
+        point.time_from_start = rclcpp::Duration::from_seconds(k * traj.time_step);
+        out.points.push_back(std::move(point));
+    }
+
+    return out;
+}
 
 inline trajectory_msgs::msg::JointTrajectory convertToTrajectory(
     const std::vector<Eigen::VectorXd>& joint_traj,

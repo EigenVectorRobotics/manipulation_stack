@@ -9,7 +9,7 @@ class VisualServoPlanner : public JointSpacePlanner {
     public:
         VisualServoPlanner(
             pinocchio::Model& model,
-            std::unique_ptr<HumanoidIK> ik_handle,
+            std::shared_ptr<HumanoidIK> ik_handle,
             bool left_arm = false,
             double approach_offset = 0.05,
             int final_leg_steps = 20,
@@ -22,33 +22,24 @@ class VisualServoPlanner : public JointSpacePlanner {
         );
         virtual ~VisualServoPlanner();
 
-        std::pair<
-        std::vector<Eigen::VectorXd>,
-        std::vector<Eigen::MatrixXd>>
-        planPath(
-            const Eigen::MatrixXd* goal_pose,
-            const Eigen::MatrixXd* start_pose = nullptr,
-            const Eigen::VectorXd* start_vel = nullptr,
-            const Eigen::VectorXd* goal_vel = nullptr,
-            const Eigen::VectorXd* start_acc = nullptr,
-            const Eigen::VectorXd* goal_acc = nullptr
-        ) override;
+        using JointSpacePlanner::planPath;
+        using JointSpacePlanner::planTrajectory;
 
         std::pair<
         std::vector<Eigen::VectorXd>,
         std::vector<Eigen::MatrixXd>>
+        planPath(
+            const JointState& start_state,
+            const Eigen::MatrixXd& goal_pose
+        ) override;
+
+        JointTrajectory
         planTrajectory(
-            const Eigen::MatrixXd* goal_pose,
-            const Eigen::MatrixXd* start_pose = nullptr,
-            const Eigen::VectorXd* start_vel = nullptr,
-            const Eigen::VectorXd* goal_vel = nullptr,
-            const Eigen::VectorXd* start_acc = nullptr,
-            const Eigen::VectorXd* goal_acc = nullptr,
-            double time_step = 0.1,
-            const double MAX_LIN_VEL = 0.1,
-            const double MAX_ANG_VEL = 4.0,
-            const double MAX_LIN_ACC = 0.05,
-            const double MAX_ANG_ACC = 4.0
+            const JointState& start_state,
+            const Eigen::MatrixXd& goal_pose,
+            double time_step = 0.01,
+            double max_joint_vel = 1.0,
+            double max_joint_acc = 2.0
         ) override;
 
     protected:
@@ -58,8 +49,16 @@ class VisualServoPlanner : public JointSpacePlanner {
             int steps
         );
 
+        Eigen::Matrix4d startPose(const JointState& start_state);
+
+        void appendFinalLeg(
+            const Eigen::MatrixXd& goal_pose,
+            std::vector<Eigen::VectorXd>& joints
+        );
+
         Eigen::Matrix4d intermediate_pose_offset_;
         std::vector<Eigen::Matrix4d> final_leg_;
+        Eigen::VectorXd leg_q_;
 };
 
 } // namespace HumanoidPilot

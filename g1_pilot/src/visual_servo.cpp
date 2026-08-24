@@ -259,23 +259,21 @@ private:
 
         if (left){
 
-            std::vector<Eigen::VectorXd> stash;
-            std::tie(stash, left_trajectory_) = arm_handle_->planTrajectory(
-                &goal_,
-                &left_ee_pose_,
-                &left_ee_vel_
-            );
+            auto traj = arm_handle_->planTrajectory(&goal_, &left_ee_pose_);
+            left_trajectory_.clear();
+            for (const auto& q : toJointConfigs(traj)) {
+                left_trajectory_.push_back(arm_handle_->forward_kinematics(q, true));
+            }
             path_pub_->publish(convertToPath(left_trajectory_, "pelvis", this->get_clock()->now()));
             std::reverse(left_trajectory_.begin(), left_trajectory_.end());
 
         } else {
 
-            std::vector<Eigen::VectorXd> stash;
-            std::tie(stash, right_trajectory_) = arm_handle_->planTrajectory(
-                &goal_,
-                &right_ee_pose_,
-                &right_ee_vel_
-            );
+            auto traj = arm_handle_->planTrajectory(&goal_, &right_ee_pose_);
+            right_trajectory_.clear();
+            for (const auto& q : toJointConfigs(traj)) {
+                right_trajectory_.push_back(arm_handle_->forward_kinematics(q, false));
+            }
             path_pub_->publish(convertToPath(right_trajectory_, "pelvis", this->get_clock()->now()));
             std::reverse(right_trajectory_.begin(), right_trajectory_.end());
 

@@ -6,6 +6,7 @@
 #include <pinocchio/parsers/urdf.hpp>
 #include <pinocchio/algorithm/model.hpp>
 #include <pinocchio/algorithm/rnea.hpp>
+#include <pinocchio/algorithm/frames.hpp>
 
 
 #include "core/arm_control/arm_control.h"
@@ -273,43 +274,51 @@ std::vector<Eigen::MatrixXd>>
 Humanoid::planPath(
     const Eigen::MatrixXd* goal_pose,
     const Eigen::MatrixXd* start_pose,
-    const Eigen::VectorXd* start_vel,
-    const Eigen::VectorXd* goal_vel,
-    const Eigen::VectorXd* start_acc,
-    const Eigen::VectorXd* goal_acc
+    const Eigen::VectorXd* /*start_vel*/,
+    const Eigen::VectorXd* /*goal_vel*/,
+    const Eigen::VectorXd* /*start_acc*/,
+    const Eigen::VectorXd* /*goal_acc*/
 ){
-    return impl_->motion_planner->planPath(
-        goal_pose, start_pose,
-        start_vel, goal_vel,
-        start_acc, goal_acc
-    );
+    if (goal_pose == nullptr) {
+        throw std::invalid_argument("Humanoid::planPath: goal_pose is null");
+    }
+    if (start_pose == nullptr) {
+        throw std::invalid_argument("Humanoid::planPath: start_pose is null");
+    }
+
+    return impl_->motion_planner->planPath(*goal_pose, *start_pose);
 }
 
-std::pair<
-std::vector<Eigen::VectorXd>,
-std::vector<Eigen::MatrixXd>>
+JointTrajectory
 Humanoid::planTrajectory(
     const Eigen::MatrixXd* goal_pose,
     const Eigen::MatrixXd* start_pose,
-    const Eigen::VectorXd* start_vel,
-    const Eigen::VectorXd* goal_vel,
-    const Eigen::VectorXd* start_acc,
-    const Eigen::VectorXd* goal_acc,
     double time_step,
-    const double MAX_LIN_VEL,
-    const double MAX_ANG_VEL,
-    const double MAX_LIN_ACC,
-    const double MAX_ANG_ACC
+    double max_joint_vel,
+    double max_joint_acc
 ){
+    if (goal_pose == nullptr) {
+        throw std::invalid_argument("Humanoid::planTrajectory: goal_pose is null");
+    }
+    if (start_pose == nullptr) {
+        throw std::invalid_argument("Humanoid::planTrajectory: start_pose is null");
+    }
+
     return impl_->motion_planner->planTrajectory(
-        goal_pose, start_pose,
-        start_vel, goal_vel,
-        start_acc, goal_acc,
-        time_step,
-        MAX_LIN_VEL, MAX_ANG_VEL,
-        MAX_LIN_ACC, MAX_ANG_ACC
+        *goal_pose, *start_pose,
+        time_step, max_joint_vel, max_joint_acc
     );
 }
 
+Eigen::MatrixXd Humanoid::forward_kinematics(
+    const Eigen::VectorXd& q,
+    const bool left
+){
+    pinocchio::framesForwardKinematics(impl_->model, impl_->data, q);
+
+    return left
+    ? impl_->data.oMf[impl_->model.getFrameId("L_ee")].toHomogeneousMatrix()
+    : impl_->data.oMf[impl_->model.getFrameId("R_ee")].toHomogeneousMatrix();
+}
 
 } // HumanoidPilot namespace
