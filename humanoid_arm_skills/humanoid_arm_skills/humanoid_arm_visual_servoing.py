@@ -20,12 +20,11 @@ from rclpy.action import ActionServer, ActionClient, GoalResponse, CancelRespons
 from rclpy.callback_groups import ReentrantCallbackGroup
 
 from geometry_msgs.msg import PoseStamped
-from trajectory_msgs.msg import JointTrajectory
 from std_msgs.msg import Bool, Empty, String
 
 from humanoid_manipulation_interfaces.action import VisualServoingArm as VisualServoing
-from humanoid_manipulation_interfaces.srv import PlanJointTrajectory as PlanTrajectory
-from humanoid_manipulation_interfaces.action import ControlJointTrajectory as ControlTrajectory
+from humanoid_manipulation_interfaces.srv import PlanJointTrajectory
+from humanoid_manipulation_interfaces.action import ControlJointTrajectory
 
 from humanoid_arm_skills.utils import pose_distance
 from humanoid_arm_skills.replan_policies import (
@@ -68,8 +67,6 @@ class VisualServoArmNode(Node):
         self.declare_parameter('lost_timeout', 5.0)
         self.declare_parameter('goal_rate', 2.0)
         self.declare_parameter('action_timeout', 600.0)
-        self.declare_parameter('replan_error_threshold', 0.01) # Joint Space Euc Error
-        self.declare_parameter('replan_error_duration', 5.0)
         self.declare_parameter('replan_cooldown', 5.0)
         self.declare_parameter('replan_goal_position_delta', 0.01)
         self.declare_parameter('replan_goal_orientation_delta_deg', 15.0)
@@ -84,7 +81,6 @@ class VisualServoArmNode(Node):
         self.last_goal = None
         self.is_tracking = False
         self._active_goal_handle = None
-        self._goal_pending = False
         self._controller_succeeded = False
         self.left_ee_pose = None
         self.right_ee_pose = None
@@ -93,7 +89,6 @@ class VisualServoArmNode(Node):
 
         # ── Thread-safe replan state ──
         self._replan_lock = threading.Lock()
-        self._error_exceeded_since = None   # monotonic timestamp
         self._replan_in_progress = False
         self._last_replan_time = 0.0
         self._last_planned_goal = None      # PoseStamped used in last plan
@@ -101,10 +96,6 @@ class VisualServoArmNode(Node):
         # ── Thread-safe control state ──
         self._control_lock = threading.Lock()
         self._control_goal_handle = None
-
-        # ── Trajectory state ──
-        self._trajectory_lock = threading.Lock()
-        self._current_trajectory = JointTrajectory()
 
         # ── Subscribers ──
         self.create_subscription(
@@ -131,12 +122,12 @@ class VisualServoArmNode(Node):
 
         # ── Service client ──
         self._plan_client = self.create_client(
-            PlanTrajectory, self.plan_trajectory_service,
+            PlanJointTrajectory, self.plan_trajectory_service,
             callback_group=cb_group)
 
         # ── Action client ──
         self._control_client = ActionClient(
-            self, ControlTrajectory, self.control_trajectory_action,
+            self, ControlJointTrajectory, self.control_trajectory_action,
             callback_group=cb_group)
 
         # ── Action server ──
@@ -159,8 +150,10 @@ class VisualServoArmNode(Node):
             InPostGoalCooldown(),
             InReplanCooldown(),
         ])
+        # Acceptance runs before any target for this goal has arrived, so it
+        # can only use time-based state. EECloseToGoal belongs to the replan
+        # chain, where last_goal is current.
         self._goal_acceptance_chain = ReplanPolicyChain([
-            EECloseToGoal(),
             InPostGoalCooldown(),
         ])
 
@@ -175,7 +168,8 @@ class VisualServoArmNode(Node):
             self.get_logger().warn('Rejecting goal — another is active')
             return GoalResponse.REJECT
 
-        ctx = ReplanContext(node=self, now=time.monotonic())
+        ctx = ReplanContext(node=self, now=time.monotonic(),
+                            left_arm=goal_request.left_arm)
         if self._goal_acceptance_chain.should_skip(ctx, self.get_logger()):
             return GoalResponse.REJECT
 
@@ -197,13 +191,8 @@ class VisualServoArmNode(Node):
         self.last_pose_time = None
         self.last_goal = None
         self.is_tracking = False
-        self._goal_pending = False
         self._controller_succeeded = False
-        with self._trajectory_lock:
-            self._current_trajectory = JointTrajectory()
-            self._trajectory_updated = False
         with self._replan_lock:
-            self._error_exceeded_since = None
             self._replan_in_progress = False
             self._last_replan_time = 0.0
             self._last_planned_goal = None
@@ -290,6 +279,9 @@ class VisualServoArmNode(Node):
         finally:
             self._cancel_control_goal()
             self._active_goal_handle = None
+            self.last_goal = None
+            self.last_pose_time = None
+            self._last_planned_goal = None
 
     # ── Dynamic replanning ──
 
@@ -318,19 +310,23 @@ class VisualServoArmNode(Node):
                 return
             self._replan_in_progress = True
             
-        # Skip if server is not ready
-        if not self._plan_client.service_is_ready():
-            self.get_logger().warn(
-                'PlanTrajectory service not available')
-            return
-        
+        # The in-flight controller goal is deliberately left running: the
+        # controller preempts it atomically when the new goal arrives, so the
+        # arm stays commanded for the whole planning latency. Cancelling here
+        # would clear its trajectory and leave the arm uncommanded instead.
+        #
+        # _replan_in_progress is handed over to _plan_response_cb only once a
+        # request is genuinely in flight; every other exit must clear it here,
+        # or one transient failure disables replanning for the node's life.
+        request_sent = False
         try:
-            # Cancel the in-flight controller goal so the arm stops tracking
-            # the stale trajectory while the new plan is being computed.
-            self._cancel_control_goal()
+            if not self._plan_client.service_is_ready():
+                self.get_logger().warn(
+                    'PlanJointTrajectory service not available')
+                return
 
             self.get_logger().info('Planning trajectory ...')
-            request = PlanTrajectory.Request()
+            request = PlanJointTrajectory.Request()
             request.start_pose = ee_pose
             request.target_pose = target_pose
             request.left_arm = bool(self._left_arm)
@@ -339,12 +335,16 @@ class VisualServoArmNode(Node):
 
             future = self._plan_client.call_async(request)
             future.add_done_callback(self._plan_response_cb)
-        except Exception:
-            with self._replan_lock:
-                self._replan_in_progress = False
+            request_sent = True
+        except Exception as exc:
+            self.get_logger().warn(f'Replan request failed: {exc}')
+        finally:
+            if not request_sent:
+                with self._replan_lock:
+                    self._replan_in_progress = False
 
     def _plan_response_cb(self, future):
-        """Handle PlanTrajectory service response."""
+        """Handle PlanJointTrajectory service response."""
         try:
             response = future.result()
         except Exception as e:
@@ -356,26 +356,28 @@ class VisualServoArmNode(Node):
         with self._replan_lock:
             self._replan_in_progress = False
             self._last_replan_time = time.monotonic()
-            self._error_exceeded_since = None
 
         if response.success:
             self.get_logger().info('Plan updated — sending control goal')
             self._send_control_goal(self._left_arm, response.trajectory)
         else:
-            self.get_logger().warn('PlanTrajectory failed')
+            self.get_logger().warn('PlanJointTrajectory failed')
 
-    # ── ControlTrajectory action client ──
+    # ── ControlJointTrajectory action client ──
 
     def _send_control_goal(self, left_arm, trajectory):
-        """Send (or re-send) a ControlTrajectory goal."""
-        self._cancel_control_goal()
-
-        if not self._control_client.wait_for_server(timeout_sec=10.0):
+        """Send (or re-send) a ControlJointTrajectory goal."""
+        # No cancel here: sending the new goal preempts the old one inside the
+        # controller, which keeps the arm commanded across the handover.
+        # This runs inside a callback-group thread, so it must not block.
+        if not self._control_client.server_is_ready():
             self.get_logger().warn(
-                'ControlTrajectory action server not available')
+                'ControlJointTrajectory action server not available')
+            with self._control_lock:
+                self._control_goal_handle = None
             return
 
-        goal = ControlTrajectory.Goal()
+        goal = ControlJointTrajectory.Goal()
         goal.left_arm = left_arm
         goal.trajectory = trajectory
 
@@ -386,7 +388,7 @@ class VisualServoArmNode(Node):
     def _control_goal_response_cb(self, future):
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().warn('ControlTrajectory goal rejected')
+            self.get_logger().warn('ControlJointTrajectory goal rejected')
             with self._control_lock:
                 self._control_goal_handle = None
             return
@@ -396,40 +398,22 @@ class VisualServoArmNode(Node):
         result_future.add_done_callback(self._control_result_cb)
 
     def _control_feedback_cb(self, feedback_msg):
-        """Handle ControlTrajectory feedback — trigger replan on sustained error."""
+        """Log controller progress.
+
+        This used to replan when ``current_error`` stayed high, which was
+        meaningful while the controller advanced waypoints on tracking error.
+        The controller now advances on elapsed time, so ``current_error`` is
+        ordinary tracking lag and ``waypoints_remaining`` counts down on a
+        clock — neither indicates a stuck arm. Replanning is driven by target
+        motion instead (see ``_filtered_pose_cb``).
+        """
         fb = feedback_msg.feedback
-        error, _ = self._compute_errors(self._left_arm)
-        now = time.monotonic()
+        dist, _ = self._compute_errors(self._left_arm)
 
         self.get_logger().debug(
-            f'Control feedback: goal error={error:.4f}, tracking error={fb.current_error:.4f} now={now:.2f} last={self._error_exceeded_since}'
+            f'Control feedback: goal distance={dist:.4f}m '
+            f'tracking lag={fb.current_error:.4f} '
             f'waypoints={fb.waypoints_remaining}/{fb.total_waypoints}')
-
-        replan_error_threshold = self.get_parameter(
-            'replan_error_threshold').value
-        replan_error_duration = self.get_parameter(
-            'replan_error_duration').value
-
-        with self._replan_lock:
-            if fb.current_error < replan_error_threshold:
-                self._error_exceeded_since = None
-                return
-
-            if self._error_exceeded_since is None:
-                self._error_exceeded_since = now
-                return
-
-            if now - self._error_exceeded_since < replan_error_duration:
-                return
-            
-        self._error_exceeded_since = None
-            
-        self.get_logger().info(
-            f'Error {fb.current_error:.4f} exceeded '
-            f'{replan_error_threshold} for '
-            f'>{replan_error_duration}s — replanning')
-            
-        self._request_replan()
 
     def _control_result_cb(self, future):
         """Handle result from ControlTrajectory action server."""
@@ -441,9 +425,9 @@ class VisualServoArmNode(Node):
                     f'(final_error={result.final_error:.4f})')
                 self._controller_succeeded = True
             else:
-                if result.final_error == -2.0:
+                if result.final_error in (-1.0, -2.0):
                     self.get_logger().info(
-                        'Control trajectory preempted by new plan')
+                        'Control trajectory superseded (preempted or cancelled)')
                 else:
                     self.get_logger().warn(
                         f'Control trajectory failed '
@@ -507,7 +491,6 @@ class VisualServoArmNode(Node):
 
         self.last_pose_time = self.get_clock().now().nanoseconds
         self.last_goal = msg
-        self._goal_pending = True
 
         if self._active_goal_handle is None:
             return

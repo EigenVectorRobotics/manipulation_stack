@@ -30,7 +30,7 @@ def generate_launch_description():
                               default_value='/trajectory_controller'),
         DeclareLaunchArgument('arm_safety_distance_x', default_value='-0.01'),
         DeclareLaunchArgument('arm_safety_distance_y', default_value='0.0'),
-        DeclareLaunchArgument('arm_safety_distance_z', default_value='0.0'),
+        DeclareLaunchArgument('arm_safety_distance_z', default_value='0.03'),
 
         # g1_pilot controller / plan_trajectory
         DeclareLaunchArgument('namespace', default_value=''),

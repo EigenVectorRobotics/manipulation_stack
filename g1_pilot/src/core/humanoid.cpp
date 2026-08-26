@@ -34,14 +34,14 @@ struct Humanoid::Impl {
 
     std::shared_ptr<HumanoidIK> ik;
     std::unique_ptr<ImpedanceController> controller;
-    std::unique_ptr<JointSpacePlanner> motion_planner;
+    std::unique_ptr<VisualServoPlanner> motion_planner;
 
     void initialize(){
         data = pinocchio::Data(model);
         ik = std::make_shared<HumanoidIK>(model, geom);
         // controller = std::make_unique<IKTrajTracker>(model, ik);
         controller = std::make_unique<ImpedanceController>(model);
-        motion_planner = std::make_unique<JointSpacePlanner>(model, ik);
+        motion_planner = std::make_unique<VisualServoPlanner>(model, ik);
     }
 
     JointState grav_ff(JointState current_state){

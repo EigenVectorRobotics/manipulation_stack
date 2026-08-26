@@ -16,10 +16,19 @@ class ReplanContext:
     """Read-only snapshot passed to each policy.
 
     ``now`` is captured once by the caller so cooldown policies share a
-    consistent timestamp.
+    consistent timestamp. ``left_arm`` lets goal-acceptance evaluate the
+    *incoming* request's arm instead of the node's, which still holds the
+    previous goal's value at accept time; ``None`` falls back to the node.
     """
     node: Any
     now: float
+    left_arm: Optional[bool] = None
+
+    @property
+    def arm_is_left(self) -> bool:
+        if self.left_arm is not None:
+            return self.left_arm
+        return self.node._left_arm
 
 
 @dataclass(frozen=True)
@@ -51,7 +60,7 @@ class NoActiveGoal(ReplanPolicy):
 class EEPoseUnavailable(ReplanPolicy):
     def evaluate(self, ctx):
         node = ctx.node
-        ee = node.left_ee_pose if node._left_arm else node.right_ee_pose
+        ee = node.left_ee_pose if ctx.arm_is_left else node.right_ee_pose
         if ee is None:
             return Skip(message='Replan skipped — ee poses not available')
         return None
@@ -67,7 +76,7 @@ class TargetPoseUnavailable(ReplanPolicy):
 class EECloseToGoal(ReplanPolicy):
     def evaluate(self, ctx):
         node = ctx.node
-        dist, _ = node._compute_errors(node._left_arm)
+        dist, _ = node._compute_errors(ctx.arm_is_left)
         threshold = node.get_parameter('replan_skip_distance').value
         if dist < threshold:
             return Skip(

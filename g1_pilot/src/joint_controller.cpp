@@ -75,7 +75,6 @@ public:
             this->get_parameter("right_ee_pose_topic").as_string(), 10);
 
         /* Subscribers */
-        this->declare_parameter<double>("waypoint_error_margin", 0.003);
         this->declare_parameter<std::string>("feedback_topic", "feedback");
         feedback_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
             this->get_parameter("feedback_topic").as_string(), 10,
@@ -207,10 +206,6 @@ private:
 
             if (active_goal_handle_ != goal_handle) {
                 RCLCPP_INFO(this->get_logger(), "Goal preempted, exiting execute thread");
-                auto result = std::make_shared<TrajectoryControllerAction::Result>();
-                result->success = false;
-                result->final_error = -2.0;
-                goal_handle->canceled(result);
                 return;
             }
 

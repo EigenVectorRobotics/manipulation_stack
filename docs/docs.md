@@ -505,7 +505,7 @@ Drives the arm to a perceived target (a tracked surface normal) by **dynamically
 3. Send the returned trajectory to the `ControlJointTrajectory` action.
 4. In the main loop (default 2 Hz), monitor:
    - Goal-pose drift (position Δ ≥ `replan_goal_position_delta`, orientation Δ ≥ `replan_goal_orientation_delta_deg`) → trigger replan.
-   - Sustained controller error > `replan_error_threshold` for > `replan_error_duration` s → trigger replan.
+   - (No error-based replan trigger: the controller advances on elapsed time, so its `current_error` is tracking lag rather than a stuck-arm signal.)
    - Tracking lost → report in feedback.
    - Goal succeeded / cancelled / timed out → terminate.
 5. Replans are gated by a `ReplanPolicyChain` (no active goal, EE/target unavailable, EE within `replan_skip_distance`, post-goal cooldown, replan cooldown, replan in progress).
@@ -516,14 +516,12 @@ Drives the arm to a perceived target (a tracked surface normal) by **dynamically
 - Feedback: `distance_to_goal`, `orientation_error_deg`, `tracking_lost`, `elapsed_time`, `current_goal`
 - Result: `success`, `message`, `final_distance`, `orientation_error_deg`
 
-**Key parameters** (all dynamic via `dynamic_params`):
+**Key parameters** (read via `get_parameter(...)` at use time):
 
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
 | `goal_rate` | 2.0 Hz | Main loop rate. |
 | `action_timeout` | 600 s | Per-goal timeout. |
-| `replan_error_threshold` | 0.01 | Joint-space RMS error to start replan timer. |
-| `replan_error_duration` | 5.0 s | Sustained-error window before replan fires. |
 | `replan_cooldown` | 5.0 s | Minimum gap between replans. |
 | `replan_skip_distance` | 0.12 m | Don't replan when EE is closer than this. |
 | `replan_goal_position_delta` | 0.01 m | Position drift to trigger replan. |
@@ -854,7 +852,7 @@ Re-plans every 3 s and publishes IK solutions per waypoint.
 | `trajectory_controller` | `humanoid_manipulation_interfaces/ControlJointTrajectory` | `joint_controller` |
 | `humanoid_arm_visual_servoing` | `humanoid_manipulation_interfaces/VisualServoingArm` | `humanoid_arm_vs` |
 
-`ControlTrajectory.action` is still defined in `humanoid_manipulation_interfaces` for the legacy `gadgets/humanoid_arm_visual_servoing` client, but **g1_pilot no longer serves it** — all control is joint-space.
+`ControlTrajectory.action` and `PlanTrajectory.srv` (the SE(3) variants) have been removed along with the `controller` node and the superseded `gadgets/humanoid_arm_visual_servoing` package — all planning and control is joint-space.
 
 ---
 
