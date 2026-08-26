@@ -68,12 +68,16 @@ JointState ImpedanceController::control_both_arms(
     Kd.head<3>().setConstant(Kd_linear);
     Kd.tail<3>().setConstant(Kd_angular);
 
-    desired_ee_pose_ = pinocchio::SE3(desired_l_ee_pose);
-    desired_ee_vel_ = pinocchio::Motion(desired_l_ee_vel);
+    compute_ee_error(
+        desired_l_ee_pose, desired_l_ee_vel, 
+        current_left_ee_pose_, current_left_ee_vel_in_lwa_
+    );
     compute_left_arm_control_torques();
 
-    desired_ee_pose_ = pinocchio::SE3(desired_r_ee_pose);
-    desired_ee_vel_ = pinocchio::Motion(desired_r_ee_vel);
+    compute_ee_error(
+        desired_r_ee_pose, desired_r_ee_vel, 
+        current_right_ee_pose_, current_right_ee_vel_in_lwa_
+    );
     compute_right_arm_control_torques();
 
     J_dual_.topRows(6)    = J_left_ee_;
@@ -108,8 +112,10 @@ JointState ImpedanceController::control_left_arm(
     Kd.head<3>().setConstant(Kd_linear);
     Kd.tail<3>().setConstant(Kd_angular);
     
-    desired_ee_pose_ = pinocchio::SE3(desired_ee_pose);
-    desired_ee_vel_ = pinocchio::Motion(desired_ee_vel);
+    compute_ee_error(
+        desired_ee_pose, desired_ee_vel, 
+        current_left_ee_pose_, current_left_ee_vel_in_lwa_
+    );
     compute_left_arm_control_torques();
 
     compute_nullspace_torques(J_left_ee_);
@@ -158,8 +164,10 @@ JointState ImpedanceController::control_right_arm(
     Kd.head<3>().setConstant(Kd_linear);
     Kd.tail<3>().setConstant(Kd_angular);
     
-    desired_ee_pose_ = pinocchio::SE3(desired_ee_pose);
-    desired_ee_vel_ = pinocchio::Motion(desired_ee_vel);
+    compute_ee_error(
+        desired_ee_pose, desired_ee_vel, 
+        current_right_ee_pose_, current_right_ee_vel_in_lwa_
+    );
     compute_right_arm_control_torques();
 
     compute_nullspace_torques(J_right_ee_);
@@ -198,50 +206,34 @@ JointState ImpedanceController::control_right_arm(
 
 void ImpedanceController::compute_left_arm_control_torques(){
 
-    error_twist_in_world_.linear() =
-        desired_ee_pose_.translation() - current_left_ee_pose_.translation();
-    error_twist_in_world_.angular() = pinocchio::log3(
-        desired_ee_pose_.rotation() * current_left_ee_pose_.rotation().transpose()
-    );
-
-    error_vel_in_world_ = desired_ee_vel_ - current_left_ee_vel_in_world_;
-
     l_control_torques = J_left_ee_.transpose() * (
-        Kp.asDiagonal() * error_twist_in_world_.toVector() +
-        Kd.asDiagonal() * error_vel_in_world_.toVector()
+        Kp.asDiagonal() * error_twist_in_lwa_.toVector() +
+        Kd.asDiagonal() * error_vel_in_lwa_.toVector()
     );
 
     l_error_magnitude = std::sqrt(
-        error_twist_in_world_.linear().squaredNorm() +
-        error_twist_in_world_.angular().squaredNorm()*0.05
+        error_twist_in_lwa_.linear().squaredNorm() +
+        error_twist_in_lwa_.angular().squaredNorm()*0.05
     );
 
-    std::cout<< "lin: " << error_twist_in_world_.linear().squaredNorm() <<std::endl;
-    std::cout<< "ang: " << error_twist_in_world_.angular().squaredNorm() <<std::endl;
+    std::cout<< "lin: " << error_twist_in_lwa_.linear().squaredNorm() <<std::endl;
+    std::cout<< "ang: " << error_twist_in_lwa_.angular().squaredNorm() <<std::endl;
     std::cout<< "mag: " << l_error_magnitude <<std::endl;
 }
 
 void ImpedanceController::compute_right_arm_control_torques(){
 
-    error_twist_in_world_.linear() =
-        desired_ee_pose_.translation() - current_right_ee_pose_.translation();
-    error_twist_in_world_.angular() = pinocchio::log3(
-        desired_ee_pose_.rotation() * current_right_ee_pose_.rotation().transpose()
-    );
-
-    error_vel_in_world_ = desired_ee_vel_ - current_right_ee_vel_in_world_;
-
     r_control_torques = J_right_ee_.transpose() * (
-        Kp.asDiagonal() * error_twist_in_world_.toVector() +
-        Kd.asDiagonal() * error_vel_in_world_.toVector()
+        Kp.asDiagonal() * error_twist_in_lwa_.toVector() +
+        Kd.asDiagonal() * error_vel_in_lwa_.toVector()
     );
 
     r_error_magnitude = std::sqrt(
-        error_twist_in_world_.linear().squaredNorm() +
-        error_twist_in_world_.angular().squaredNorm()*0.05
+        error_twist_in_lwa_.linear().squaredNorm() +
+        error_twist_in_lwa_.angular().squaredNorm()*0.05
     );
-    std::cout<< "lin: " << error_twist_in_world_.linear().squaredNorm() <<std::endl;
-    std::cout<< "ang: " << error_twist_in_world_.angular().squaredNorm() <<std::endl;
+    std::cout<< "lin: " << error_twist_in_lwa_.linear().squaredNorm() <<std::endl;
+    std::cout<< "ang: " << error_twist_in_lwa_.angular().squaredNorm() <<std::endl;
 }
 
 

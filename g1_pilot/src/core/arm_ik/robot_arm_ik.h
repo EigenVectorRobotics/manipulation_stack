@@ -1,7 +1,6 @@
 #ifndef ROBOT_ARM_IK_H
 #define ROBOT_ARM_IK_H
 
-#include "utils.h"
 #include "core/interfaces.h"
 
 #include <pinocchio/multibody/data.hpp>
@@ -20,6 +19,8 @@ public:
         pinocchio::Model& model,
         pinocchio::GeometryModel& geom_model
     );
+
+    ~HumanoidIK();
 
     virtual JointState solve_ik(
         const Eigen::Matrix4d& left_wrist,
@@ -63,22 +64,8 @@ protected:
     pinocchio::GeometryModel geom_model_;
     pinocchio::GeometryData geom_data_;
 
-    casadi::Opti opti_l_;
-    casadi::Opti opti_r_;
-    casadi::Opti opti_;
-
-    casadi::MX b_var_q_;
-    casadi::MX b_var_q_last_;
-    casadi::MX b_param_tf_l_;
-    casadi::MX b_param_tf_r_;
-
-    casadi::MX l_var_q_;
-    casadi::MX l_var_q_last_;
-    casadi::MX l_param_tf_l_;
-
-    casadi::MX r_var_q_;
-    casadi::MX r_var_q_last_;
-    casadi::MX r_param_tf_r_;
+    struct CasadiData;
+    std::unique_ptr<CasadiData> cd;
 
     pinocchio::FrameIndex L_hand_id_;
     pinocchio::FrameIndex R_hand_id_;

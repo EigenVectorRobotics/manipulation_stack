@@ -46,6 +46,6 @@ def generate_launch_description():
             'position_control_topic': LaunchConfiguration('position_control_topic'),
             'use_sim_time': LaunchConfiguration('use_sim_time'),
         }],
-        # prefix=['xterm -r gdb -ex run --args']
+        # prefix=['xterm -e gdb -ex run --args']
     ))
     return ld

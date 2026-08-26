@@ -61,12 +61,6 @@ private:
 
     void compute_nullspace_torques(const Eigen::MatrixXd& J);
 
-    pinocchio::SE3 desired_ee_pose_;
-    pinocchio::Motion desired_ee_vel_;
-
-    pinocchio::Motion error_twist_in_world_;
-    pinocchio::Motion error_vel_in_world_;
-
     Eigen::VectorXd torques_dual_arm_;
 
     Eigen::VectorXd Kp = Eigen::VectorXd::Zero(6);

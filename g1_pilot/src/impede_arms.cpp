@@ -72,16 +72,6 @@ public:
 		// goal_set_ = false;
 		goal_set_ = true;
 
-
-		// arm_handle_->Kp_linear = 50.0;
-        // arm_handle_->Kp_angular = 5.0;
-
-        // arm_handle_->Kd_linear = 5.0;
-        // arm_handle_->Kd_angular = 2.0;
-
-		// arm_handle_->Kp_nullspace = 25.0;
-		// arm_handle_->Kd_nullspace = 5.0;
-
 	}
 
 	Eigen::Matrix4d left_target;
@@ -99,10 +89,10 @@ private:
 		message_.effort = msg->effort;
 
 		left_target = create_se3(1.0, 0.0, 0.0, 0, 0.2, 0.2, 0.1);
-		right_target = create_se3(1.0, 0.0, 0.0, 0, 0.6, -0.4, 0.2);
+		right_target = create_se3(1.0, 0.0, 0.0, 0, 0.2, -0.2, 0.2);
 
-		left_target = arm_handle_->get_current_left_ee_pose();
-		right_target = arm_handle_->get_current_right_ee_pose();
+		// left_target = arm_handle_->get_current_left_ee_pose();
+		// right_target = arm_handle_->get_current_right_ee_pose();
 
 		// Default pos:
 		// left_target = create_se3(1.0, 0.0, 0.0, 0, 0.2, 0.2, 0.1);

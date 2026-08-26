@@ -16,7 +16,7 @@ def generate_launch_description():
 
     ld.add_action(DeclareLaunchArgument('namespace', default_value=''))
     ld.add_action(DeclareLaunchArgument(
-        'PublishTF', default_value='false',
+        'PublishTF', default_value='true',
         description='Whether to include display.launch.py for TF publishing'
     ))
     ld.add_action(DeclareLaunchArgument('joint_trajectory_topic', default_value='joint_trajectory'))

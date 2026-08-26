@@ -18,8 +18,8 @@ public:
     Eigen::MatrixXd get_current_left_ee_pose(){return current_left_ee_pose_.toHomogeneousMatrix();};
     Eigen::MatrixXd get_current_right_ee_pose(){return current_right_ee_pose_.toHomogeneousMatrix();};
 
-    Eigen::VectorXd get_current_left_ee_vel(){return current_left_ee_vel_in_world_.toVector();};
-    Eigen::VectorXd get_current_right_ee_vel(){return current_right_ee_vel_in_world_.toVector();};
+    Eigen::VectorXd get_current_left_ee_vel(){return current_left_ee_vel_in_lwa_.toVector();};
+    Eigen::VectorXd get_current_right_ee_vel(){return current_right_ee_vel_in_lwa_.toVector();};
 
     double get_current_left_ee_error(){return l_error_magnitude;};
     double get_current_right_ee_error(){return r_error_magnitude;};
@@ -35,8 +35,8 @@ protected:
     void compute_ee_error(
         Eigen::MatrixXd left_ee_desired,
         Eigen::VectorXd ee_vel_desired,
-        Eigen::MatrixXd ee_pos,
-        Eigen::VectorXd ee_vel
+        pinocchio::SE3 ee_pos,
+        pinocchio::Motion ee_vel
     );
 
     
@@ -52,11 +52,17 @@ protected:
     Eigen::VectorXd current_joint_vel_;
     Eigen::VectorXd current_joint_eff_;
 
+    pinocchio::SE3 desired_ee_pose_;
+    pinocchio::Motion desired_ee_vel_;
+
+    pinocchio::Motion error_twist_in_lwa_;
+    pinocchio::Motion error_vel_in_lwa_;
+
     pinocchio::SE3 current_left_ee_pose_;
     pinocchio::SE3 current_right_ee_pose_;
 
-    pinocchio::Motion current_left_ee_vel_in_world_;
-    pinocchio::Motion current_right_ee_vel_in_world_;
+    pinocchio::Motion current_left_ee_vel_in_lwa_;
+    pinocchio::Motion current_right_ee_vel_in_lwa_;
 
     pinocchio::Data::Matrix6x J_left_ee_;
     pinocchio::Data::Matrix6x J_right_ee_;

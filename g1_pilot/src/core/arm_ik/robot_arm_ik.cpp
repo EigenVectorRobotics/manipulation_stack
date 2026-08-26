@@ -4,6 +4,8 @@
 #include <pinocchio/algorithm/rnea.hpp>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/collision/collision.hpp>
+#include <pinocchio/spatial/se3.hpp>
+#include <casadi/casadi.hpp>
 
 #include <memory>
 #include <fstream>
@@ -18,10 +20,55 @@
 
 namespace HumanoidPilot {
 
+/**
+ * @brief Convert Eigen::VectorXd to casadi::DM
+ */
+inline casadi::DM eigen_to_casadi(const Eigen::VectorXd& vec) {
+    std::vector<double> data(vec.data(), vec.data() + vec.size());
+    return casadi::DM(data);
+}
+
+/**
+ * @brief Convert Eigen::Matrix4d to casadi::DM
+ */
+inline casadi::DM eigen_to_casadi(const Eigen::Matrix4d& mat) {
+    std::vector<double> data;
+    data.reserve(16);
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            data.push_back(mat(row, col));
+        }
+    }
+    return casadi::DM::reshape(casadi::DM(data), 4, 4);
+}
+
+inline pinocchio::SE3 eigen_to_pinocchio(const Eigen::Matrix4d& mat) {
+    return pinocchio::SE3(mat);
+}
+
+struct HumanoidIK::CasadiData{
+    casadi::Opti opti_l_;
+    casadi::Opti opti_r_;
+    casadi::Opti opti_;
+
+    casadi::MX b_var_q_;
+    casadi::MX b_var_q_last_;
+    casadi::MX b_param_tf_l_;
+    casadi::MX b_param_tf_r_;
+
+    casadi::MX l_var_q_;
+    casadi::MX l_var_q_last_;
+    casadi::MX l_param_tf_l_;
+
+    casadi::MX r_var_q_;
+    casadi::MX r_var_q_last_;
+    casadi::MX r_param_tf_r_;
+};
+
 HumanoidIK::HumanoidIK(
     pinocchio::Model& model,
     pinocchio::GeometryModel& geom_model
-) : model_(model), geom_model_(geom_model)
+) : model_(model), geom_model_(geom_model), cd(std::make_unique<CasadiData>())
 {
     // Get required joint IDs    
     L_hand_id_ = model_.getFrameId("L_ee");
@@ -46,6 +93,8 @@ HumanoidIK::HumanoidIK(
     setup_optimization();
 
 }
+
+HumanoidIK::~HumanoidIK() = default;
 
 bool HumanoidIK::check_collision(const Eigen::VectorXd& q) {
     return pinocchio::computeCollisions(
@@ -165,35 +214,35 @@ void HumanoidIK::setup_optimization() {
         {right_arm_cost}
     );
 
-    b_var_q_ = opti_.variable(model_.nq, 1);
-    b_var_q_last_ = opti_.parameter(model_.nq, 1);
-    b_param_tf_l_ = opti_.parameter(4, 4);
-    b_param_tf_r_ = opti_.parameter(4, 4);
+    cd->b_var_q_ = cd->opti_.variable(model_.nq, 1);
+    cd->b_var_q_last_ = cd->opti_.parameter(model_.nq, 1);
+    cd->b_param_tf_l_ = cd->opti_.parameter(4, 4);
+    cd->b_param_tf_r_ = cd->opti_.parameter(4, 4);
 
-    l_var_q_ = opti_l_.variable(model_.nq, 1);
-    l_var_q_last_ = opti_l_.parameter(model_.nq, 1);
-    l_param_tf_l_ = opti_l_.parameter(4, 4);
+    cd->l_var_q_ = cd->opti_l_.variable(model_.nq, 1);
+    cd->l_var_q_last_ = cd->opti_l_.parameter(model_.nq, 1);
+    cd->l_param_tf_l_ = cd->opti_l_.parameter(4, 4);
 
-    r_var_q_ = opti_r_.variable(model_.nq, 1);
-    r_var_q_last_ = opti_r_.parameter(model_.nq, 1);
-    r_param_tf_r_ = opti_r_.parameter(4, 4);
+    cd->r_var_q_ = cd->opti_r_.variable(model_.nq, 1);
+    cd->r_var_q_last_ = cd->opti_r_.parameter(model_.nq, 1);
+    cd->r_param_tf_r_ = cd->opti_r_.parameter(4, 4);
             
     casadi::DM lower_limits = eigen_to_casadi(model_.lowerPositionLimit);
     casadi::DM upper_limits = eigen_to_casadi(model_.upperPositionLimit);
 
-    opti_.subject_to(opti_.bounded(lower_limits, b_var_q_, upper_limits));
-    opti_l_.subject_to(opti_l_.bounded(lower_limits, l_var_q_, upper_limits));
-    opti_r_.subject_to(opti_r_.bounded(lower_limits, r_var_q_, upper_limits));
+    cd->opti_.subject_to(cd->opti_.bounded(lower_limits, cd->b_var_q_, upper_limits));
+    cd->opti_l_.subject_to(cd->opti_l_.bounded(lower_limits, cd->l_var_q_, upper_limits));
+    cd->opti_r_.subject_to(cd->opti_r_.bounded(lower_limits, cd->r_var_q_, upper_limits));
 
     // Minimize
-    opti_.minimize(both_arm_cost_f({
-        b_var_q_, b_var_q_last_, b_param_tf_l_, b_param_tf_r_
+    cd->opti_.minimize(both_arm_cost_f({
+        cd->b_var_q_, cd->b_var_q_last_, cd->b_param_tf_l_, cd->b_param_tf_r_
     })[0]);
-    opti_l_.minimize(left_arm_cost_f({
-        l_var_q_, l_var_q_last_, l_param_tf_l_
+    cd->opti_l_.minimize(left_arm_cost_f({
+        cd->l_var_q_, cd->l_var_q_last_, cd->l_param_tf_l_
     })[0]);
-    opti_r_.minimize(right_arm_cost_f({
-        r_var_q_, r_var_q_last_, r_param_tf_r_
+    cd->opti_r_.minimize(right_arm_cost_f({
+        cd->r_var_q_, cd->r_var_q_last_, cd->r_param_tf_r_
     })[0]);
     
     // Set optimization options
@@ -212,9 +261,9 @@ void HumanoidIK::setup_optimization() {
     opts["ipopt.derivative_test"] = "none";
     opts["ipopt.jacobian_approximation"] = "exact";
     
-    opti_.solver("ipopt", opts);
-    opti_l_.solver("ipopt", opts);
-    opti_r_.solver("ipopt", opts);
+    cd->opti_.solver("ipopt", opts);
+    cd->opti_l_.solver("ipopt", opts);
+    cd->opti_r_.solver("ipopt", opts);
 
 }
 
@@ -258,10 +307,10 @@ JointState HumanoidIK::solve_ik(
     }
 
     // Set optimization initial guess and parameters
-    opti_.set_initial(b_var_q_, eigen_to_casadi(init_data_));
-    opti_.set_value(b_param_tf_l_, eigen_to_casadi(left_wrist));
-    opti_.set_value(b_param_tf_r_, eigen_to_casadi(right_wrist));
-    opti_.set_value(b_var_q_last_, eigen_to_casadi(init_data_));
+    cd->opti_.set_initial(cd->b_var_q_, eigen_to_casadi(init_data_));
+    cd->opti_.set_value(cd->b_param_tf_l_, eigen_to_casadi(left_wrist));
+    cd->opti_.set_value(cd->b_param_tf_r_, eigen_to_casadi(right_wrist));
+    cd->opti_.set_value(cd->b_var_q_last_, eigen_to_casadi(init_data_));
 
     // Solve optimization problem
     std::vector<double> sol_q_vec;
@@ -269,17 +318,17 @@ JointState HumanoidIK::solve_ik(
     try {
 
         // Solve optimization problem
-        casadi::OptiSol sol = opti_.solve();
+        casadi::OptiSol sol = cd->opti_.solve();
 
         // Extract solution
-        sol_q_vec = static_cast<std::vector<double>>(sol.value(b_var_q_));
+        sol_q_vec = static_cast<std::vector<double>>(sol.value(cd->b_var_q_));
 
     } catch (const std::exception& e) {
         std::cerr << "ERROR in convergence: " << e.what() << std::endl;
         
         // Get debug solution
         sol_q_vec = static_cast<std::vector<double>>(
-            opti_.debug().value(b_var_q_)
+            cd->opti_.debug().value(cd->b_var_q_)
         );
 
     }
@@ -357,13 +406,13 @@ JointState HumanoidIK::solve_ik(
     }
 
     if (left){
-        opti_l_.set_initial(l_var_q_, eigen_to_casadi(init_data_));
-        opti_l_.set_value(l_param_tf_l_, eigen_to_casadi(wrist));
-        opti_l_.set_value(l_var_q_last_, eigen_to_casadi(init_data_));
+        cd->opti_l_.set_initial(cd->l_var_q_, eigen_to_casadi(init_data_));
+        cd->opti_l_.set_value(cd->l_param_tf_l_, eigen_to_casadi(wrist));
+        cd->opti_l_.set_value(cd->l_var_q_last_, eigen_to_casadi(init_data_));
     } else {
-        opti_r_.set_initial(r_var_q_, eigen_to_casadi(init_data_));
-        opti_r_.set_value(r_param_tf_r_, eigen_to_casadi(wrist));
-        opti_r_.set_value(r_var_q_last_, eigen_to_casadi(init_data_));
+        cd->opti_r_.set_initial(cd->r_var_q_, eigen_to_casadi(init_data_));
+        cd->opti_r_.set_value(cd->r_param_tf_r_, eigen_to_casadi(wrist));
+        cd->opti_r_.set_value(cd->r_var_q_last_, eigen_to_casadi(init_data_));
     }
 
     // Solve optimization problem
@@ -371,11 +420,11 @@ JointState HumanoidIK::solve_ik(
     
     try {
         if (left){
-            casadi::OptiSol sol = opti_l_.solve();
-            sol_q_vec = static_cast<std::vector<double>>(sol.value(l_var_q_));
+            casadi::OptiSol sol = cd->opti_l_.solve();
+            sol_q_vec = static_cast<std::vector<double>>(sol.value(cd->l_var_q_));
         } else {
-            casadi::OptiSol sol = opti_r_.solve();
-            sol_q_vec = static_cast<std::vector<double>>(sol.value(r_var_q_));
+            casadi::OptiSol sol = cd->opti_r_.solve();
+            sol_q_vec = static_cast<std::vector<double>>(sol.value(cd->r_var_q_));
         }
 
     } catch (const std::exception& e) {
@@ -384,11 +433,11 @@ JointState HumanoidIK::solve_ik(
         // Get debug solution
         if (left){
             sol_q_vec = static_cast<std::vector<double>>(
-                opti_l_.debug().value(l_var_q_)
+                cd->opti_l_.debug().value(cd->l_var_q_)
             );
         } else {
             sol_q_vec = static_cast<std::vector<double>>(
-                opti_r_.debug().value(r_var_q_)
+                cd->opti_r_.debug().value(cd->r_var_q_)
             );
         }
         

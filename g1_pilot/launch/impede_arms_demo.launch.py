@@ -40,5 +40,6 @@ def generate_launch_description():
             'goal_pose_topic': LaunchConfiguration('goal_pose_topic'),
             'effort_control_topic': LaunchConfiguration('effort_control_topic'),
         }],
+        # prefix=['xterm -e gdb -ex run --args']
     ))
     return ld

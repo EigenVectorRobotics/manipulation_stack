@@ -3,6 +3,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "rclcpp/rclcpp.hpp"
@@ -11,7 +12,6 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav_msgs/msg/path.hpp"
-#include "trajectory_msgs/msg/joint_trajectory.hpp"
 
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -20,7 +20,6 @@
 
 #include <g1_pilot/g1_pilot.h>
 #include "helper_funcs.h"
-
 
 using namespace std::chrono_literals;
 using namespace HumanoidPilot;
@@ -57,7 +56,6 @@ public:
 
         arm_ = std::make_unique<Humanoid>(&config);
         left_arm_ = this->get_parameter("left_arm").as_bool();
-        // arm_->setLeftArm(left_arm_);
 
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -97,12 +95,13 @@ private:
 
     rclcpp::TimerBase::SharedPtr control_loop_;
 
-    std::vector<std::string> trajectory_joint_names_;
-    std::vector<trajectory_msgs::msg::JointTrajectoryPoint> trajectory_points_;
+    JointTrajectory trajectory_;
     size_t next_waypoint_idx_ = 0;
+    size_t total_waypoints_ = 0;
     double error_ = 0.0;
 
     JointState current_state_;
+    std::unordered_map<std::string, size_t> joint_name_to_index_;
 
     std::mutex feedback_mutex_;
     std::mutex traj_mutex_;
@@ -127,7 +126,7 @@ private:
         RCLCPP_INFO(this->get_logger(),
             "Received goal pose in frame: %s", msg->header.frame_id.c_str());
 
-        Eigen::MatrixXd start_matrix;
+        JointState start_state;
         {
             std::lock_guard<std::mutex> lock(feedback_mutex_);
             if (current_state_.name.empty()) {
@@ -135,10 +134,7 @@ private:
                     "No joint feedback received yet — cannot plan");
                 return;
             }
-            arm_->update(current_state_);
-            start_matrix = left_arm_
-                ? arm_->get_current_left_ee_pose()
-                : arm_->get_current_right_ee_pose();
+            start_state = current_state_;
         }
 
         Eigen::MatrixXd goal_matrix = transform_to_pelvis_(*msg);
@@ -147,41 +143,38 @@ private:
             return;
         }
 
-        auto joint_trajectory = arm_->planTrajectory(
-            &goal_matrix, &start_matrix);
-
-        std::vector<Eigen::VectorXd> joint_traj = toJointConfigs(joint_trajectory);
-
-        std::vector<Eigen::MatrixXd> cart_traj;
-        cart_traj.reserve(joint_traj.size());
-        for (const auto& q : joint_traj) {
-            cart_traj.push_back(arm_->forward_kinematics(q, left_arm_));
-        }
-
-        if (joint_traj.empty()) {
-            RCLCPP_ERROR(this->get_logger(),
-                "Trajectory planning failed: empty trajectory");
+        auto planned_traj = arm_->planTrajectory(start_state, goal_matrix);
+        if (planned_traj.position.empty() || planned_traj.position[0].empty()) {
+            RCLCPP_ERROR(this->get_logger(), "Trajectory planning failed: empty trajectory");
             return;
         }
 
-        auto first = arm_->solve_ik(cart_traj.front(), left_arm_);
+        const size_t num_pts = planned_traj.position[0].size();
+        const size_t num_joints = planned_traj.name.size();
+
+        // Perform transpose: convert SOA columns into Cartesian frames for visualization
+        std::vector<Eigen::MatrixXd> cart_traj;
+        cart_traj.reserve(num_pts);
+        Eigen::VectorXd q(num_joints);
+
+        for (size_t step = 0; step < num_pts; ++step) {
+            for (size_t j = 0; j < num_joints; ++j) {
+                q[j] = planned_traj.position[j][step];
+            }
+            cart_traj.push_back(arm_->forward_kinematics(q, left_arm_));
+        }
+
+        nav_msgs::msg::Path path_msg = convertToPath(cart_traj, "pelvis", this->get_clock()->now());
 
         {
             std::lock_guard<std::mutex> lock(traj_mutex_);
-            trajectory_joint_names_ = first.name;
-            trajectory_points_.clear();
-            trajectory_points_.reserve(joint_traj.size());
-            for (const auto &q : joint_traj) {
-                trajectory_msgs::msg::JointTrajectoryPoint pt;
-                pt.positions.assign(q.data(), q.data() + q.size());
-                trajectory_points_.push_back(std::move(pt));
-            }
+            trajectory_ = std::move(planned_traj);
             next_waypoint_idx_ = 0;
+            total_waypoints_ = num_pts;
         }
 
-        path_pub_->publish(convertToPath(cart_traj, "pelvis", this->get_clock()->now()));
-        RCLCPP_INFO(this->get_logger(),
-            "Planned trajectory with %zu waypoints", joint_traj.size());
+        path_pub_->publish(path_msg);
+        RCLCPP_INFO(this->get_logger(), "Planned trajectory with %zu waypoints", num_pts);
     }
 
     void handle_feedback_(sensor_msgs::msg::JointState::UniquePtr msg)
@@ -191,59 +184,73 @@ private:
         current_state_.position = msg->position;
         current_state_.velocity = msg->velocity;
         current_state_.effort = msg->effort;
+
+        if (joint_name_to_index_.size() != msg->name.size()) {
+            joint_name_to_index_.clear();
+            for (size_t i = 0; i < msg->name.size(); ++i) {
+                joint_name_to_index_[msg->name[i]] = i;
+            }
+        }
     }
 
     void controller_()
     {
         std::scoped_lock lock(feedback_mutex_, traj_mutex_);
 
-        if (current_state_.name.empty()) {
+        if (current_state_.name.empty() || total_waypoints_ == 0 || next_waypoint_idx_ >= total_waypoints_) {
             return;
         }
 
         arm_->update(current_state_);
 
-        if (trajectory_points_.empty() || next_waypoint_idx_ >= trajectory_points_.size()) {
-            return;
-        }
+        error_ = compute_position_error_(next_waypoint_idx_);
+        const double margin = this->get_parameter("waypoint_error_margin").as_double();
 
-        auto current_target = trajectory_points_[next_waypoint_idx_];
-        error_ = compute_position_error_(current_target.positions);
-
-        if (error_ < this->get_parameter("waypoint_error_margin").as_double()) {
+        while (error_ < margin && next_waypoint_idx_ < total_waypoints_) {
             ++next_waypoint_idx_;
-            if (next_waypoint_idx_ >= trajectory_points_.size()) {
+            if (next_waypoint_idx_ >= total_waypoints_) {
                 RCLCPP_INFO(this->get_logger(), "Trajectory complete");
                 return;
             }
-            current_target = trajectory_points_[next_waypoint_idx_];
-            error_ = compute_position_error_(current_target.positions);
+            error_ = compute_position_error_(next_waypoint_idx_);
         }
 
         RCLCPP_INFO(this->get_logger(), "Waypoint %zu/%zu, error: %f",
-            next_waypoint_idx_ + 1, trajectory_points_.size(), error_);
+            next_waypoint_idx_ + 1, total_waypoints_, error_);
 
         sensor_msgs::msg::JointState cmd;
         cmd.header.stamp = this->get_clock()->now();
-        cmd.name = trajectory_joint_names_;
-        cmd.position = current_target.positions;
-        cmd.velocity = current_target.velocities;
-        cmd.effort.assign(trajectory_joint_names_.size(), 0.0);
+        cmd.name = trajectory_.name;
+
+        const size_t num_joints = trajectory_.name.size();
+        cmd.position.resize(num_joints);
+        cmd.velocity.resize(num_joints);
+        cmd.effort.assign(num_joints, 0.0);
+
+        for (size_t j = 0; j < num_joints; ++j) {
+            cmd.position[j] = trajectory_.position[j][next_waypoint_idx_];
+            if (j < trajectory_.velocity.size() && next_waypoint_idx_ < trajectory_.velocity[j].size()) {
+                cmd.velocity[j] = trajectory_.velocity[j][next_waypoint_idx_];
+            }
+        }
+
         position_pub_->publish(cmd);
     }
 
-    double compute_position_error_(const std::vector<double> &positions)
+    double compute_position_error_(size_t waypoint_idx)
     {
         double sum_sq = 0.0;
         size_t counted = 0;
-        const size_t n = std::min(trajectory_joint_names_.size(), positions.size());
-        for (size_t i = 0; i < n; ++i) {
-            for (size_t j = 0; j < current_state_.name.size() && j < current_state_.position.size(); ++j) {
-                if (trajectory_joint_names_[i] == current_state_.name[j]) {
-                    const double d = positions[i] - current_state_.position[j];
+        const size_t num_joints = trajectory_.name.size();
+
+        for (size_t j = 0; j < num_joints; ++j) {
+            auto it = joint_name_to_index_.find(trajectory_.name[j]);
+            if (it != joint_name_to_index_.end()) {
+                const size_t feedback_idx = it->second;
+                if (feedback_idx < current_state_.position.size() && waypoint_idx < trajectory_.position[j].size()) {
+                    const double d = trajectory_.position[j][waypoint_idx] - current_state_.position[feedback_idx];
                     sum_sq += d * d;
                     ++counted;
-                    break;
                 }
             }
         }

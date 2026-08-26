@@ -41,8 +41,8 @@ void ArmController::update(JointState current_state)
     current_left_ee_pose_ = data_.oMf[left_ee_id_];
     current_right_ee_pose_ = data_.oMf[right_ee_id_];
 
-    current_left_ee_vel_in_world_  = pinocchio::getFrameVelocity(model_, data_, left_ee_id_,  pinocchio::LOCAL_WORLD_ALIGNED);
-    current_right_ee_vel_in_world_ = pinocchio::getFrameVelocity(model_, data_, right_ee_id_, pinocchio::LOCAL_WORLD_ALIGNED);
+    current_left_ee_vel_in_lwa_  = pinocchio::getFrameVelocity(model_, data_, left_ee_id_,  pinocchio::LOCAL_WORLD_ALIGNED);
+    current_right_ee_vel_in_lwa_ = pinocchio::getFrameVelocity(model_, data_, right_ee_id_, pinocchio::LOCAL_WORLD_ALIGNED);
 
     l_control_torques = Eigen::VectorXd::Zero(model_.nv);
     r_control_torques = Eigen::VectorXd::Zero(model_.nv);
@@ -76,10 +76,17 @@ JointState ArmController::control_no_arms(
 void ArmController::compute_ee_error(
     Eigen::MatrixXd ee_pos_desired,
     Eigen::VectorXd ee_vel_desired,
-    Eigen::MatrixXd ee_pos,
-    Eigen::VectorXd ee_vel
+    pinocchio::SE3 ee_pos,
+    pinocchio::Motion ee_vel
 ){
-    
+
+    auto error_local = pinocchio::log6(
+        ee_pos.actInv(pinocchio::SE3(ee_pos_desired))
+    );
+    error_twist_in_lwa_.linear()  = ee_pos.rotation() * error_local.linear();
+    error_twist_in_lwa_.angular() = ee_pos.rotation() * error_local.angular();
+
+    error_vel_in_lwa_ = pinocchio::Motion(ee_vel_desired) - ee_vel;
 
 }
 

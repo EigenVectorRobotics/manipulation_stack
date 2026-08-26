@@ -31,13 +31,14 @@ struct Humanoid::Impl {
     Eigen::VectorXd grav_torques;
 
     std::shared_ptr<HumanoidIK> ik;
-    std::unique_ptr<IKTrajTracker> controller;
+    std::unique_ptr<ImpedanceController> controller;
     std::unique_ptr<JointSpacePlanner> motion_planner;
 
     void initialize(){
         data = pinocchio::Data(model);
         ik = std::make_shared<HumanoidIK>(model, geom);
-        controller = std::make_unique<IKTrajTracker>(model, ik);
+        // controller = std::make_unique<IKTrajTracker>(model, ik);
+        controller = std::make_unique<ImpedanceController>(model);
         motion_planner = std::make_unique<JointSpacePlanner>(model, ik);
     }
 
@@ -308,6 +309,20 @@ Humanoid::planTrajectory(
         *goal_pose, *start_pose,
         time_step, max_joint_vel, max_joint_acc
     );
+}
+
+JointTrajectory
+Humanoid::planTrajectory(
+    const JointState& start_state,
+    const Eigen::MatrixXd& goal_pose,
+    double time_step,
+    double max_joint_vel,
+    double max_joint_acc
+){
+    return impl_->motion_planner->planTrajectory(
+        start_state, goal_pose,
+        time_step, max_joint_vel, max_joint_acc
+    ); 
 }
 
 Eigen::MatrixXd Humanoid::forward_kinematics(
