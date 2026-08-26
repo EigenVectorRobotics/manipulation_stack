@@ -13,8 +13,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/VisualServoingArm.action"
   "srv/PlanTrajectory.srv"
   "srv/PlanJointTrajectory.srv"
-  "msg/JointState.msg"
-  "msg/JointCmd.msg"
   DEPENDENCIES geometry_msgs nav_msgs trajectory_msgs
 )
 

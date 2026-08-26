@@ -48,6 +48,20 @@ public:
 
     JointState grav_ff(JointState input);
 
+    /**
+     * @brief Full inverse-dynamics feedforward torque, tau = M(q)qdd + C(q,qd)qd + g(q).
+     *
+     * grav_ff covers only the g(q) term. Pass the trajectory's acceleration
+     * sample to also feed forward the inertial and Coriolis terms. acceleration
+     * is indexed like state.name; an empty vector reduces this to grav_ff.
+     * The returned JointState lists every joint of the reduced model in
+     * pinocchio order, which is not necessarily the caller's order.
+     */
+    JointState inverse_dynamics(
+        const JointState& state,
+        const std::vector<double>& acceleration = {}
+    );
+
     std::vector<std::string> get_joint_names();
 
     JointState solve_ik(
@@ -146,6 +160,8 @@ public:
         const Eigen::VectorXd& q,
         const bool left = false
     );
+
+    void setLeftArm(bool left_arm);
 
 protected:
 

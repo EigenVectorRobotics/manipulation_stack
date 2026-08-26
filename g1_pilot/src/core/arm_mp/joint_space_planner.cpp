@@ -35,6 +35,17 @@ constexpr int GRID_PER_WAYPOINT = 20;
 constexpr int MIN_GRID_POINTS = 200;
 
 /**
+ * @brief Number of warm-started IK solves used to place one target pose.
+ *
+ * The IK cost carries a 0.1 * ||q - q_last||^2 proximity term. On the first
+ * solve q_last is the measured start configuration, which biases the solution
+ * away from the target; re-solving drives q_last to the solution itself and
+ * the bias vanishes. Five passes reach the residual floor set by the posture
+ * regulariser.
+ */
+constexpr int IK_REFINEMENT_PASSES = 5;
+
+/**
  * @brief Natural cubic spline through the waypoints, parameterised by
  * cumulative chord length in joint space.
  *
@@ -320,6 +331,14 @@ JointState JointSpacePlanner::poseToJointConfig(
         &pos_err, &rot_err
     );
 
+    for (int pass = 1; pass < IK_REFINEMENT_PASSES; ++pass) {
+        js = ik_handle_->solve_ik(
+            pose, left_arm_,
+            nullptr, nullptr,
+            &pos_err, &rot_err
+        );
+    }
+
     std::cout << "[poseToJointConfig] IK pos err (m): " << pos_err
               << ", rot err (rad): " << rot_err << std::endl;
 
@@ -575,6 +594,9 @@ JointSpacePlanner::planPath(
         jointstate_to_vectors(start_state, model_);
     std::tie(goal_q_, std::ignore, std::ignore) =
         jointstate_to_vectors(goal_state, model_);
+
+    start_q_ = start_q_.cwiseMax(model_.lowerPositionLimit).cwiseMin(model_.upperPositionLimit);
+    goal_q_ = goal_q_.cwiseMax(model_.lowerPositionLimit).cwiseMin(model_.upperPositionLimit);
 
     (void) runRRTStar(start_q_, goal_q_, waypoints_);
 

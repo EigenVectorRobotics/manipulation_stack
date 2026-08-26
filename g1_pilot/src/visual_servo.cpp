@@ -12,6 +12,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <unordered_map>
 
 using namespace HumanoidPilot;
 using namespace std::chrono_literals;
@@ -123,11 +125,25 @@ private:
     
     // Variables
     Eigen::MatrixXd goal_;
-    std::vector<Eigen::MatrixXd> left_trajectory_;
-    std::vector<Eigen::MatrixXd> right_trajectory_;
-    double left_error_;
-    double right_error_;
-    JointState cmd_;
+
+    /**
+     * @brief One arm's joint-space trajectory plus the wall-clock instant it
+     * started, so samples are selected by elapsed time rather than by
+     * tracking error.
+     */
+    struct ArmTrajectory {
+        JointTrajectory traj;
+        rclcpp::Time start;
+        bool active = false;
+        bool completed = false;
+
+        std::size_t samples() const {
+            return traj.position.empty() ? 0 : traj.position.front().size();
+        }
+    };
+
+    ArmTrajectory left_traj_;
+    ArmTrajectory right_traj_;
     JointState current_state_;
 
     rclcpp::Time last_left_goal_time_;
@@ -140,62 +156,110 @@ private:
             return;
         }
 
-        if (left_trajectory_.empty() && right_trajectory_.empty()){
-            cmd_ = arm_handle_->control_no_arms(
-                current_state_
-            );
-        }
-        else if (!left_trajectory_.empty() && right_trajectory_.empty()){
-            cmd_ = arm_handle_->control_left_arm(
-                current_state_, 
-                left_trajectory_.back()
-            );
-        } 
-        else if (left_trajectory_.empty() && !right_trajectory_.empty()){
-            cmd_ = arm_handle_->control_right_arm(
-                current_state_, 
-                right_trajectory_.back()
-            );
-        } 
-        else {
-            cmd_ = arm_handle_->control_both_arms(
-                current_state_, 
-                left_trajectory_.back(),
-                right_trajectory_.back()
-            );
-        }
-
-        if (left_trajectory_.size()>1){
-            left_error_ = arm_handle_->get_current_left_ee_error();
-            if (left_error_<0.02){ // 2 cm 
-                left_trajectory_.pop_back();
-            }
-            RCLCPP_INFO(this->get_logger(), "Left error: %f", left_error_);
-        }
-
-        if (right_trajectory_.size()>1){
-            right_error_ = arm_handle_->get_current_right_ee_error();
-            if (right_error_<0.02){ // 2 cm 
-                right_trajectory_.pop_back();
-            }
-            RCLCPP_INFO(this->get_logger(), "Right error: %f", right_error_);
-        }
+        arm_handle_->update(current_state_);
 
         left_ee_pose_ = arm_handle_->get_current_left_ee_pose();
         right_ee_pose_ = arm_handle_->get_current_right_ee_pose();
-        // left_ee_vel_ = arm_handle_->get_current_left_ee_vel();
-        // right_ee_vel_ = arm_handle_->get_current_right_ee_vel();
+
+        // Hold every joint at its measured position by default; each active
+        // trajectory then overwrites only the joints it actually commands.
+        const std::size_t n = current_state_.name.size();
+        std::vector<double> position = current_state_.position;
+        std::vector<double> velocity(n, 0.0);
+        std::vector<double> accel(n, 0.0);
+        position.resize(n, 0.0);
+
+        std::unordered_map<std::string, std::size_t> index_of;
+        for (std::size_t i = 0; i < n; ++i) index_of[current_state_.name[i]] = i;
+
+        apply_trajectory_(left_traj_, index_of, position, velocity, accel);
+        apply_trajectory_(right_traj_, index_of, position, velocity, accel);
 
         auto cmd_msg_ = sensor_msgs::msg::JointState();
         cmd_msg_.header.stamp = this->get_clock()->now();
-
-        cmd_msg_.name = cmd_.name;
-        cmd_msg_.position = cmd_.position;
-        cmd_msg_.velocity = cmd_.velocity;
-        cmd_msg_.effort = cmd_.effort;
+        cmd_msg_.name = current_state_.name;
+        cmd_msg_.position = position;
+        cmd_msg_.velocity = velocity;
+        cmd_msg_.effort = feedforward_torque_(
+            current_state_.name, position, velocity, accel);
 
         joint_states_pub_->publish(cmd_msg_);
+    }
 
+    /**
+     * @brief Write one trajectory's current sample into the merged command.
+     *
+     * The sample is chosen by elapsed time against the trajectory's own
+     * time_step, and the trajectory deactivates once its last sample is due.
+     */
+    void apply_trajectory_(
+        ArmTrajectory& arm,
+        const std::unordered_map<std::string, std::size_t>& index_of,
+        std::vector<double>& position,
+        std::vector<double>& velocity,
+        std::vector<double>& accel)
+    {
+        const std::size_t samples = arm.samples();
+        if (!arm.active || samples == 0) return;
+
+        const double step = arm.traj.time_step > 0.0 ? arm.traj.time_step : 0.01;
+        const double elapsed = (this->get_clock()->now() - arm.start).seconds();
+        const std::size_t last = samples - 1;
+
+        std::size_t k = static_cast<std::size_t>(
+            std::max(0.0, std::floor(elapsed / step)));
+        if (k > last) k = last;
+
+        for (std::size_t j = 0; j < arm.traj.name.size(); ++j) {
+            auto it = index_of.find(arm.traj.name[j]);
+            if (it == index_of.end()) continue;
+            const std::size_t i = it->second;
+
+            if (j < arm.traj.position.size() && k < arm.traj.position[j].size())
+                position[i] = arm.traj.position[j][k];
+            if (j < arm.traj.velocity.size() && k < arm.traj.velocity[j].size())
+                velocity[i] = arm.traj.velocity[j][k];
+            if (j < arm.traj.acceleration.size() && k < arm.traj.acceleration[j].size())
+                accel[i] = arm.traj.acceleration[j][k];
+        }
+
+        // The final sample is held indefinitely: the arm must keep being
+        // commanded to the goal, otherwise the command decays back to the
+        // measured position and any tracking residual becomes permanent.
+        if (k == last && !arm.completed) {
+            arm.completed = true;
+            RCLCPP_INFO(this->get_logger(), "Trajectory complete");
+        }
+    }
+
+    /**
+     * @brief Inverse-dynamics feedforward, reordered to the commanded joint list.
+     */
+    std::vector<double> feedforward_torque_(
+        const std::vector<std::string>& names,
+        const std::vector<double>& position,
+        const std::vector<double>& velocity,
+        const std::vector<double>& acceleration)
+    {
+        JointState query;
+        query.name = names;
+        query.position = position;
+        query.velocity = velocity;
+        query.effort.assign(names.size(), 0.0);
+
+        const JointState ff = arm_handle_->inverse_dynamics(query, acceleration);
+
+        std::unordered_map<std::string, double> ff_by_name;
+        for (std::size_t j = 0; j < ff.name.size() && j < ff.effort.size(); ++j) {
+            ff_by_name[ff.name[j]] = ff.effort[j];
+        }
+
+        std::vector<double> effort(names.size(), 0.0);
+        for (std::size_t j = 0; j < names.size(); ++j) {
+            auto it = ff_by_name.find(names[j]);
+            if (it != ff_by_name.end()) effort[j] = it->second;
+        }
+        return effort;
     }
 
     void handle_new_goal_pose_(geometry_msgs::msg::PoseStamped::UniquePtr msg, bool left){
@@ -257,27 +321,26 @@ private:
             return;
         }
 
-        if (left){
+        arm_handle_->setLeftArm(left);
+        auto traj = arm_handle_->planTrajectory(
+            &goal_, left ? &left_ee_pose_ : &right_ee_pose_);
 
-            auto traj = arm_handle_->planTrajectory(&goal_, &left_ee_pose_);
-            left_trajectory_.clear();
-            for (const auto& q : toJointConfigs(traj)) {
-                left_trajectory_.push_back(arm_handle_->forward_kinematics(q, true));
-            }
-            path_pub_->publish(convertToPath(left_trajectory_, "pelvis", this->get_clock()->now()));
-            std::reverse(left_trajectory_.begin(), left_trajectory_.end());
-
-        } else {
-
-            auto traj = arm_handle_->planTrajectory(&goal_, &right_ee_pose_);
-            right_trajectory_.clear();
-            for (const auto& q : toJointConfigs(traj)) {
-                right_trajectory_.push_back(arm_handle_->forward_kinematics(q, false));
-            }
-            path_pub_->publish(convertToPath(right_trajectory_, "pelvis", this->get_clock()->now()));
-            std::reverse(right_trajectory_.begin(), right_trajectory_.end());
-
+        if (traj.position.empty() || traj.position.front().empty()){
+            RCLCPP_ERROR(this->get_logger(), "Trajectory planning failed: empty trajectory");
+            return;
         }
+
+        std::vector<Eigen::MatrixXd> cartesian;
+        for (const auto& q : toJointConfigs(traj)) {
+            cartesian.push_back(arm_handle_->forward_kinematics(q, left));
+        }
+        path_pub_->publish(convertToPath(cartesian, "pelvis", this->get_clock()->now()));
+
+        ArmTrajectory& target = left ? left_traj_ : right_traj_;
+        target.traj = std::move(traj);
+        target.start = this->get_clock()->now();
+        target.active = true;
+        target.completed = false;
 
         RCLCPP_INFO(this->get_logger(), "------/////|||||| New Trajectory Generated |||||||////////------");
         

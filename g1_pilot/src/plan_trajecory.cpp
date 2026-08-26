@@ -151,7 +151,7 @@ private:
             return;
         }
 
-        // arm_handle_->setLeftArm(request->left_arm);
+        arm_handle_->setLeftArm(request->left_arm);
 
         auto joint_trajectory = arm_handle_->planTrajectory(
                 &goal_matrix, &start_matrix);

@@ -81,7 +81,7 @@ void ArmController::compute_ee_error(
 ){
 
     auto error_local = pinocchio::log6(
-        ee_pos.actInv(pinocchio::SE3(ee_pos_desired))
+        ee_pos.actInv(pinocchio::SE3(Eigen::Matrix4d(ee_pos_desired)))
     );
     error_twist_in_lwa_.linear()  = ee_pos.rotation() * error_local.linear();
     error_twist_in_lwa_.angular() = ee_pos.rotation() * error_local.angular();

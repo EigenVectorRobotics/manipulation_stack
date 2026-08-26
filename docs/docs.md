@@ -47,7 +47,7 @@ g1_pilot/                                 # workspace overlay (colcon src/)
 
 | Package | Type | Purpose |
 |---------|------|---------|
-| `g1_pilot` | `ament_cmake` | C++ library `libg1_pilot` + 8 ROS 2 executables (controllers, planners, demos, action/service servers). |
+| `g1_pilot` | `ament_cmake` | C++ library `libg1_pilot` + 7 ROS 2 executables (controllers, planners, demos, action/service servers). |
 | `g1_description` | `ament_cmake` | URDFs (3 variants), 160 STL meshes, `display.launch.py` (RViz + dual `robot_state_publisher`s for feedback vs. control visualisation). |
 | `humanoid_arm_skills` | `ament_python` | High-level skill nodes — visual servoing action server, pose filter, noisy-pose publisher for testing. |
 | `humanoid_manipulation_interfaces` | `ament_cmake` | 3 action types, 2 service types — the contract between skills and controllers. |
@@ -73,11 +73,10 @@ g1_pilot/g1_pilot/
 │   ├── arm_mp/                    # library: poly/joint-space/visual-servo planners
 │   ├── joint_state_publisher.cpp  # node: ik_joint_state_publisher (IK demo)
 │   ├── joint_traj_publisher.cpp   # node: joint_traj_publisher (trajectory demo)
-│   ├── visual_servo.cpp           # node: visual_servo (full pipeline, dual-arm)
+│   ├── visual_servo.cpp           # node: visual_servo (full pipeline, dual-arm, joint-space)
 │   ├── impede_arms.cpp            # node: impede_arms (impedance control)
 │   ├── grav_ff.cpp                # node: grav_ff (gravity feedforward only)
 │   ├── plan_trajecory.cpp         # node: plan_trajecory (PlanJointTrajectory service server)
-│   ├── controller.cpp             # node: controller (ControlTrajectory action server, SE(3))
 │   ├── joint_controller.cpp       # node: joint_controller (ControlJointTrajectory action server)
 │   └── helper_funcs.h             # ROS-side helpers: SE(3) builders, msg conversions, workspace check
 ├── launch/                        # 8 ROS 2 launch files
@@ -162,7 +161,7 @@ The central entry point. Constructing a `Humanoid` performs the full initialisat
    - `IKTrajTracker* controller` — trajectory-tracking via per-step IK
    - `JointSpacePlanner* motion_planner` — OMPL RRT* joint-space planner
 
-`Humanoid::grav_ff(JointState)` returns gravity-compensation torques computed via Pinocchio's `computeGeneralizedGravity()`. `Humanoid::get_joint_names()` returns the names of the active (reduced) model.
+`Humanoid::grav_ff(JointState)` returns gravity-compensation torques computed via Pinocchio's `computeGeneralizedGravity()`. `Humanoid::inverse_dynamics(JointState, acceleration)` returns the **full** feedforward torque `M(q)q̈ + C(q,q̇)q̇ + g(q)` via RNEA — pass a trajectory's acceleration sample to feed forward the inertial and Coriolis terms as well; an empty acceleration vector reduces it to `grav_ff`. Both return every joint of the reduced model in pinocchio order, so callers whose joint order differs must remap by name. `Humanoid::get_joint_names()` returns the names of the active (reduced) model.
 
 #### Joint Categorisation (full 29-DOF URDF)
 
@@ -368,7 +367,7 @@ OMPL **RRT***-based joint-space motion planner. Matches the polynomial generator
 3. `resamplePath()` — densely re-sample the OMPL solution to a fixed step.
 4. `configsToPoses()` — forward-kinematics each waypoint to recover the EE pose trajectory.
 
-Velocity/acceleration arguments are accepted for API parity but ignored (RRT* is kinematic). `setLeftArm(bool)` switches arms at runtime.
+Velocity/acceleration arguments are accepted for API parity but ignored (RRT* is kinematic). `setLeftArm(bool)` switches arms at runtime, exposed on `Humanoid` as well as on the planner — **callers must set it before every plan**, since it defaults to `false` (right arm) and is sticky across calls.
 
 #### `VisualServoPlanner` *(extends `JointSpacePlanner`)*
 
@@ -392,22 +391,11 @@ The final leg uses linear interpolation rather than the polynomial generator sin
 
 All nodes accept the standard parameters (`asset_file`, `asset_root`, `config_file`, `num_dof`) and load the URDF + `g1.yaml` from `g1_description` / `g1_pilot` package shares.
 
-### `controller` — `ControlTrajectory` action server
-
-Action server that tracks an SE(3) `nav_msgs/Path` waypoint-by-waypoint using `IKTrajTracker`. Pre-empts any active goal when a new one arrives.
-
-| | Topic / Action | Type |
-|---|---|---|
-| Action srv | `trajectory_controller` | `humanoid_manipulation_interfaces/ControlTrajectory` |
-| Sub | `feedback` | `sensor_msgs/JointState` |
-| Pub | `position_control` | `sensor_msgs/JointState` |
-| Pub | `left_ee_pose`, `right_ee_pose` | `geometry_msgs/PoseStamped` (in `pelvis` frame) |
-
-Control loop: 50 ms. Waypoints pop when error < `waypoint_error_margin` (default 0.007). Goal is rejected if the final pose fails workspace bounds (`isWithinLimits`). On success/cancel the IK solver's smoothing filter is reset.
-
 ### `joint_controller` — `ControlJointTrajectory` action server
 
 Same pattern as `controller`, but the goal is a `trajectory_msgs/JointTrajectory` (joint-space) and the controller commands raw positions + gravity feedforward effort instead of running IK each tick.
+
+Waypoints are selected by **elapsed time against each point's `time_from_start`**, not by tracking error, so the trajectory executes at its planned rate and a tracking offset cannot stall it. The commanded effort is a full inverse-dynamics feedforward built from the point's `accelerations`, matched back to the goal's joint order by name because `inverse_dynamics` returns every joint of the reduced model in pinocchio order.
 
 | | Topic / Action | Type |
 |---|---|---|
@@ -416,7 +404,7 @@ Same pattern as `controller`, but the goal is a `trajectory_msgs/JointTrajectory
 | Pub | `position_control` | `sensor_msgs/JointState` |
 | Pub | `left_ee_pose`, `right_ee_pose` | `geometry_msgs/PoseStamped` |
 
-Default `waypoint_error_margin` is 0.003 (radians, RMS over commanded joints).
+`waypoint_error_margin` (default 0.003 rad, RMS over commanded joints) is now reporting-only — it feeds the action feedback/result and no longer gates waypoint advance.
 
 ### `plan_trajecory` — `PlanJointTrajectory` service server
 
@@ -434,6 +422,8 @@ Uses TF2 to transform the request's `target_pose` into the `pelvis` frame.
 
 Combines motion planning, trajectory tracking, and real-time control inside a single node. Subscribes to **separate** left/right goal topics (suffixed `/left`, `/right`), each gated by an independent cooldown.
 
+Execution is **joint-space**: each arm keeps its planned `JointTrajectory`, samples it by elapsed time against `time_step`, and the two are merged into a single command by joint name. Joints not covered by an active trajectory hold their measured position, so one arm can move while the other holds. The command carries position, velocity, and a full inverse-dynamics feedforward torque built from the trajectory's accelerations.
+
 | | Topic | Type |
 |---|---|---|
 | Sub | `<goal_pose_topic>/left` | `geometry_msgs/PoseStamped` |
@@ -442,7 +432,9 @@ Combines motion planning, trajectory tracking, and real-time control inside a si
 | Pub | `position_control` | `sensor_msgs/JointState` |
 | Pub | `traj` | `nav_msgs/Path` |
 
-Goal cooldown is `goal_cooldown` (default 1 s). At 20 Hz the control loop pops the next waypoint when EE error < 2 cm. When idle the node publishes gravity compensation only.
+Goal cooldown is `goal_cooldown` (default 1 s). The 20 Hz control loop advances each trajectory on elapsed time; when both are finished the node holds position with gravity compensation.
+
+Planning calls `setLeftArm` before `planTrajectory`; without it the planner silently plans for the right arm regardless of which goal topic fired.
 
 The default `visual_servo.launch.py` remaps `<goal_pose_topic>/right` → `/track3d/selected_normal_pose_filtered_upright` to plug into the perception stack.
 
@@ -578,7 +570,6 @@ ROS 2 interface package generated via `rosidl_default_generators`. Contains 3 ac
 
 | Action | Goal | Feedback | Result |
 |--------|------|----------|--------|
-| `ControlTrajectory` | `bool left_arm`, `nav_msgs/Path trajectory` | `float64 current_error`, `uint32 waypoints_remaining`, `uint32 total_waypoints` | `bool success`, `float64 final_error` |
 | `ControlJointTrajectory` | `bool left_arm`, `trajectory_msgs/JointTrajectory trajectory` | `float64 current_error`, `uint32 waypoints_remaining`, `uint32 total_waypoints` | `bool success`, `float64 final_error` |
 | `VisualServoingArm` | `string target_description`, `bool left_arm` | `float64 distance_to_goal`, `float64 orientation_error_deg`, `bool tracking_lost`, `float64 elapsed_time`, `geometry_msgs/PoseStamped current_goal` | `float64 final_distance`, `float64 orientation_error_deg`, `bool success`, `string message` |
 
@@ -640,7 +631,7 @@ Trajectories — both polynomial and the visual-servo final leg — are generate
 
 CMake supports two modes:
 
-- **With ROS 2** — detected via `AMENT_PREFIX_PATH` / `COLCON_PREFIX_PATH` / `ROS_DISTRO`. Builds the library + all 8 ROS executables.
+- **With ROS 2** — detected via `AMENT_PREFIX_PATH` / `COLCON_PREFIX_PATH` / `ROS_DISTRO`. Builds the library + all 7 ROS executables.
 - **Standalone C++** — builds only the library, installs to a local `install/` directory. No ROS dependencies needed.
 
 ### Dual-arm impedance with null-space stiffness
@@ -681,7 +672,7 @@ left_target.block<3,1>(0,3)  = Eigen::Vector3d(0.2,  0.2, 0.1);
 Eigen::Matrix4d right_target = Eigen::Matrix4d::Identity();
 right_target.block<3,1>(0,3) = Eigen::Vector3d(0.2, -0.2, 0.1);
 
-JointState result = arm.ik->solve_ik(left_target, right_target);
+JointState result = arm.solve_ik(left_target, right_target);
 // result.name      — joint names (active reduced model)
 // result.position  — joint angles (rad)
 // result.effort    — gravity feedforward + (optional) external-wrench torques (N·m)
@@ -690,15 +681,15 @@ JointState result = arm.ik->solve_ik(left_target, right_target);
 #### Solve IK for a single arm
 
 ```cpp
-JointState res_r = arm.ik->solve_ik(right_target, /*left=*/false);
-JointState res_l = arm.ik->solve_ik(left_target,  /*left=*/true);
+JointState res_r = arm.solve_ik(right_target, /*left=*/false);
+JointState res_l = arm.solve_ik(left_target,  /*left=*/true);
 ```
 
 #### Warm-start with current state
 
 ```cpp
-Eigen::VectorXd current_q = /* from encoders */;
-JointState result = arm.ik->solve_ik(left_target, right_target, &current_q);
+JointState current_state = /* from encoders */;
+JointState result = arm.solve_ik(left_target, right_target, &current_state);
 ```
 
 #### Plan a joint-space trajectory (RRT*)
@@ -710,12 +701,18 @@ start.block<3,1>(0,3) = Eigen::Vector3d(0.20, -0.15, 0.10);
 Eigen::Matrix4d goal  = Eigen::Matrix4d::Identity();
 goal.block<3,1>(0,3)  = Eigen::Vector3d(0.35, -0.15, 0.25);
 
-arm.motion_planner->setLeftArm(false);
-auto [joint_traj, pose_traj] = arm.motion_planner->planTrajectory(&goal, &start);
+arm.setLeftArm(false);
+JointTrajectory traj = arm.planTrajectory(&goal, &start);
 
-for (const auto& q : joint_traj) {
-    /* send q to actuators … */
+// traj.position is indexed [joint][sample]; traj.time_step is the sample period.
+for (std::size_t k = 0; k < traj.position.front().size(); ++k) {
+    for (std::size_t j = 0; j < traj.name.size(); ++j) {
+        /* traj.position[j][k] → actuator j at t = k * traj.time_step */
+    }
 }
+
+// Planning from the measured joint state avoids an IK solve on the start pose:
+JointTrajectory from_state = arm.planTrajectory(current_state, goal);
 ```
 
 #### Gravity feedforward only
@@ -854,11 +851,10 @@ Re-plans every 3 s and publishes IK solutions per waypoint.
 
 | Action | Type | Server |
 |--------|------|--------|
-| `trajectory_controller` | `humanoid_manipulation_interfaces/ControlTrajectory` | `controller` |
 | `trajectory_controller` | `humanoid_manipulation_interfaces/ControlJointTrajectory` | `joint_controller` |
 | `humanoid_arm_visual_servoing` | `humanoid_manipulation_interfaces/VisualServoingArm` | `humanoid_arm_vs` |
 
-(Only one of the two `trajectory_controller` action servers should be running at a time; the visual-servo skill expects the joint-space variant.)
+`ControlTrajectory.action` is still defined in `humanoid_manipulation_interfaces` for the legacy `gadgets/humanoid_arm_visual_servoing` client, but **g1_pilot no longer serves it** — all control is joint-space.
 
 ---
 

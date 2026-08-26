@@ -17,13 +17,14 @@ def generate_launch_description():
 
     ld.add_action(DeclareLaunchArgument('namespace', default_value=''))
     ld.add_action(DeclareLaunchArgument(
-        'PublishTF', default_value='false',
+        'PublishTF', default_value='true',
         description='Whether to include display.launch.py for TF publishing'
     ))
     ld.add_action(DeclareLaunchArgument('feedback_topic', default_value='feedback'))
     ld.add_action(DeclareLaunchArgument('position_control_topic', default_value='position_control'))
     ld.add_action(DeclareLaunchArgument('left_ee_pose_topic', default_value='left_ee_pose'))
     ld.add_action(DeclareLaunchArgument('right_ee_pose_topic', default_value='right_ee_pose'))
+    ld.add_action(DeclareLaunchArgument('traj_topic', default_value='traj'))
 
     ld.add_action(IncludeLaunchDescription(
         PathJoinSubstitution([description_pkg_path, 'launch', 'display.launch.py']),

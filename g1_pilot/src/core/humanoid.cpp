@@ -29,6 +29,8 @@ struct Humanoid::Impl {
     Eigen::VectorXd e;
     
     Eigen::VectorXd grav_torques;
+    Eigen::VectorXd a;
+    Eigen::VectorXd ff_torques;
 
     std::shared_ptr<HumanoidIK> ik;
     std::unique_ptr<ImpedanceController> controller;
@@ -50,6 +52,30 @@ struct Humanoid::Impl {
         grav_torques = data.g;
 
         return vectors_to_jointstate(q,v,grav_torques, model);
+    }
+
+    JointState inverse_dynamics(
+        const JointState& current_state,
+        const std::vector<double>& acceleration
+    ){
+        JointState padded = current_state;
+        padded.position.resize(padded.name.size(), 0.0);
+        padded.velocity.resize(padded.name.size(), 0.0);
+        padded.effort.resize(padded.name.size(), 0.0);
+
+        std::tie(q,v,e) = jointstate_to_vectors(padded, model);
+
+        a = Eigen::VectorXd::Zero(model.nv);
+        for (std::size_t i = 0; i < padded.name.size() && i < acceleration.size(); ++i) {
+            const auto joint_id = model.getJointId(padded.name[i]);
+            if (joint_id > 0 && joint_id < static_cast<std::size_t>(model.njoints)) {
+                a(model.joints[joint_id].idx_v()) = acceleration[i];
+            }
+        }
+
+        ff_torques = pinocchio::rnea(model, data, q, v, a);
+
+        return vectors_to_jointstate(q, v, ff_torques, model);
     }
 };
 
@@ -147,6 +173,13 @@ JointState Humanoid::grav_ff(JointState current_state){
     return impl_->grav_ff(current_state);
 }
 
+JointState Humanoid::inverse_dynamics(
+    const JointState& state,
+    const std::vector<double>& acceleration
+){
+    return impl_->inverse_dynamics(state, acceleration);
+}
+
 std::vector<std::string> Humanoid::get_joint_names() {
     return std::vector<std::string>(
         impl_->model.names.begin() + 1, impl_->model.names.end());
@@ -221,12 +254,10 @@ Eigen::VectorXd Humanoid::get_current_right_ee_vel(){
 }
 
 double Humanoid::get_current_left_ee_error(){
-    return 0.0;
-    // return impl_->controller->l_error_magnitude;
+    return impl_->controller->get_current_left_ee_error();
 }
 double Humanoid::get_current_right_ee_error(){
-    return 0.0;
-    // return impl_->controller->r_error_magnitude;
+    return impl_->controller->get_current_right_ee_error();
 }
 
 JointState Humanoid::control_no_arms(JointState current_state){
@@ -335,5 +366,7 @@ Eigen::MatrixXd Humanoid::forward_kinematics(
     ? impl_->data.oMf[impl_->model.getFrameId("L_ee")].toHomogeneousMatrix()
     : impl_->data.oMf[impl_->model.getFrameId("R_ee")].toHomogeneousMatrix();
 }
+
+void Humanoid::setLeftArm(bool left_arm) { impl_->motion_planner->setLeftArm(left_arm); }
 
 } // HumanoidPilot namespace

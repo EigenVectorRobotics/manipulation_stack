@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <memory>
@@ -99,6 +100,7 @@ private:
     size_t next_waypoint_idx_ = 0;
     size_t total_waypoints_ = 0;
     double error_ = 0.0;
+    rclcpp::Time traj_start_;
 
     JointState current_state_;
     std::unordered_map<std::string, size_t> joint_name_to_index_;
@@ -143,6 +145,7 @@ private:
             return;
         }
 
+        arm_->setLeftArm(left_arm_);
         auto planned_traj = arm_->planTrajectory(start_state, goal_matrix);
         if (planned_traj.position.empty() || planned_traj.position[0].empty()) {
             RCLCPP_ERROR(this->get_logger(), "Trajectory planning failed: empty trajectory");
@@ -171,6 +174,7 @@ private:
             trajectory_ = std::move(planned_traj);
             next_waypoint_idx_ = 0;
             total_waypoints_ = num_pts;
+            traj_start_ = this->get_clock()->now();
         }
 
         path_pub_->publish(path_msg);
@@ -203,17 +207,15 @@ private:
 
         arm_->update(current_state_);
 
-        error_ = compute_position_error_(next_waypoint_idx_);
-        const double margin = this->get_parameter("waypoint_error_margin").as_double();
+        const double step = trajectory_.time_step > 0.0 ? trajectory_.time_step : 0.01;
+        const double elapsed = (this->get_clock()->now() - traj_start_).seconds();
+        const size_t last_idx = total_waypoints_ - 1;
 
-        while (error_ < margin && next_waypoint_idx_ < total_waypoints_) {
-            ++next_waypoint_idx_;
-            if (next_waypoint_idx_ >= total_waypoints_) {
-                RCLCPP_INFO(this->get_logger(), "Trajectory complete");
-                return;
-            }
-            error_ = compute_position_error_(next_waypoint_idx_);
-        }
+        size_t idx = static_cast<size_t>(std::max(0.0, std::floor(elapsed / step)));
+        const bool finished = idx >= last_idx;
+        next_waypoint_idx_ = std::min(idx, last_idx);
+
+        error_ = compute_position_error_(next_waypoint_idx_);
 
         RCLCPP_INFO(this->get_logger(), "Waypoint %zu/%zu, error: %f",
             next_waypoint_idx_ + 1, total_waypoints_, error_);
@@ -227,14 +229,59 @@ private:
         cmd.velocity.resize(num_joints);
         cmd.effort.assign(num_joints, 0.0);
 
+        std::vector<double> accel(num_joints, 0.0);
         for (size_t j = 0; j < num_joints; ++j) {
             cmd.position[j] = trajectory_.position[j][next_waypoint_idx_];
             if (j < trajectory_.velocity.size() && next_waypoint_idx_ < trajectory_.velocity[j].size()) {
                 cmd.velocity[j] = trajectory_.velocity[j][next_waypoint_idx_];
             }
+            if (j < trajectory_.acceleration.size() && next_waypoint_idx_ < trajectory_.acceleration[j].size()) {
+                accel[j] = trajectory_.acceleration[j][next_waypoint_idx_];
+            }
         }
 
+        cmd.effort = feedforward_torque_(cmd.name, cmd.position, cmd.velocity, accel);
+
         position_pub_->publish(cmd);
+
+        if (finished) {
+            RCLCPP_INFO(this->get_logger(), "Trajectory complete");
+            next_waypoint_idx_ = total_waypoints_;
+        }
+    }
+
+    /**
+     * @brief Inverse-dynamics feedforward for one trajectory sample, reordered
+     * to match the commanded joint list.
+     *
+     * inverse_dynamics returns every joint of the reduced model in pinocchio
+     * order, so the torques are matched back by name.
+     */
+    std::vector<double> feedforward_torque_(
+        const std::vector<std::string>& names,
+        const std::vector<double>& position,
+        const std::vector<double>& velocity,
+        const std::vector<double>& acceleration)
+    {
+        JointState query;
+        query.name = names;
+        query.position = position;
+        query.velocity = velocity;
+        query.effort.assign(names.size(), 0.0);
+
+        const JointState ff = arm_->inverse_dynamics(query, acceleration);
+
+        std::unordered_map<std::string, double> ff_by_name;
+        for (size_t j = 0; j < ff.name.size() && j < ff.effort.size(); ++j) {
+            ff_by_name[ff.name[j]] = ff.effort[j];
+        }
+
+        std::vector<double> effort(names.size(), 0.0);
+        for (size_t j = 0; j < names.size(); ++j) {
+            auto it = ff_by_name.find(names[j]);
+            if (it != ff_by_name.end()) effort[j] = it->second;
+        }
+        return effort;
     }
 
     double compute_position_error_(size_t waypoint_idx)
