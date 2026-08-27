@@ -150,6 +150,8 @@ configs:
       categories:
         left_wrist:  {armature: 0.01, damping: 0.05, friction: 0.1}
         right_wrist: {armature: 0.01, damping: 0.05, friction: 0.1}
+        
+    collision_margin: -0.01
     end_effectors:
       left:
         parent_joint: left_wrist_yaw_joint

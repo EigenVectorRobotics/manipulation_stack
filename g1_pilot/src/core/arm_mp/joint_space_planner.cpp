@@ -307,8 +307,7 @@ JointSpacePlanner::JointSpacePlanner(
         const auto* rv = s->as<ob::RealVectorStateSpace::StateType>();
         for (int i = 0; i < nq_; ++i) rrt_->q_check(i) = rv->values[i];
         if (ik_handle_ == nullptr) return true;
-        // return !ik_handle_->check_collision(rrt_->q_check);
-        return true;
+        return !ik_handle_->check_collision(rrt_->q_check);
     });
     rrt_->si->setup();
 }

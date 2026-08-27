@@ -17,7 +17,8 @@ class HumanoidIK {
 public:
     HumanoidIK(
         pinocchio::Model& model,
-        pinocchio::GeometryModel& geom_model
+        pinocchio::GeometryModel& geom_model,
+        double collision_margin = 0.0
     );
 
     ~HumanoidIK();
@@ -69,6 +70,8 @@ protected:
 
     pinocchio::FrameIndex L_hand_id_;
     pinocchio::FrameIndex R_hand_id_;
+
+    double collision_margin_ = 0.0;
 
     int nq_;
     int nv_;

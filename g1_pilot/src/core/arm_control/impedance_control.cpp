@@ -216,9 +216,6 @@ void ImpedanceController::compute_left_arm_control_torques(){
         error_twist_in_lwa_.angular().squaredNorm()*0.05
     );
 
-    std::cout<< "lin: " << error_twist_in_lwa_.linear().squaredNorm() <<std::endl;
-    std::cout<< "ang: " << error_twist_in_lwa_.angular().squaredNorm() <<std::endl;
-    std::cout<< "mag: " << l_error_magnitude <<std::endl;
 }
 
 void ImpedanceController::compute_right_arm_control_torques(){
@@ -232,8 +229,6 @@ void ImpedanceController::compute_right_arm_control_torques(){
         error_twist_in_lwa_.linear().squaredNorm() +
         error_twist_in_lwa_.angular().squaredNorm()*0.05
     );
-    std::cout<< "lin: " << error_twist_in_lwa_.linear().squaredNorm() <<std::endl;
-    std::cout<< "ang: " << error_twist_in_lwa_.angular().squaredNorm() <<std::endl;
 }
 
 

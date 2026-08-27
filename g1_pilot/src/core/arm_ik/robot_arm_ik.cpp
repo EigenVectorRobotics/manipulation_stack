@@ -67,7 +67,8 @@ struct HumanoidIK::CasadiData{
 
 HumanoidIK::HumanoidIK(
     pinocchio::Model& model,
-    pinocchio::GeometryModel& geom_model
+    pinocchio::GeometryModel& geom_model,
+    double collision_margin
 ) : model_(model), geom_model_(geom_model), cd(std::make_unique<CasadiData>())
 {
     // Get required joint IDs    
@@ -84,6 +85,15 @@ HumanoidIK::HumanoidIK(
     // Initialize data structures
     data_ = pinocchio::Data(model_);
     geom_data_ = pinocchio::GeometryData(geom_model_);
+
+    // coal rejects a negative security_margin on mesh (BVH) geometry, so the
+    // tolerance is applied to the reported penetration depth instead; that
+    // needs contact points, which are off by default.
+    for (auto& request : geom_data_.collisionRequests) {
+        request.enable_contact = true;
+        request.num_max_contacts = 4;
+    }
+    collision_margin_ = collision_margin;
     init_data_ = Eigen::VectorXd::Zero(model_.nq);
 
     nq_ = model_.nq;
@@ -97,9 +107,29 @@ HumanoidIK::HumanoidIK(
 HumanoidIK::~HumanoidIK() = default;
 
 bool HumanoidIK::check_collision(const Eigen::VectorXd& q) {
-    return pinocchio::computeCollisions(
-        model_, data_, geom_model_, geom_data_, q, true
+    // The collision meshes are coarse convex hulls. At rest the hands hang
+    // beside the hips and six hull pairs graze by under 5 mm, which would
+    // reject every plan from the robot's natural pose. Treat a pair as
+    // colliding only once it penetrates deeper than collision_margin_
+    // (negative, metres); 0.0 restores exact contact checking.
+    //
+    // stopAtFirstCollision must be false: the first contact found is not
+    // necessarily the deepest one.
+    const bool any_contact = pinocchio::computeCollisions(
+        model_, data_, geom_model_, geom_data_, q, collision_margin_ >= 0.0
     );
+    if (!any_contact || collision_margin_ >= 0.0) return any_contact;
+
+    for (std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k) {
+        const auto& result = geom_data_.collisionResults[k];
+        if (!result.isCollision()) continue;
+        for (std::size_t c = 0; c < result.numContacts(); ++c) {
+            if (result.getContact(c).penetration_depth < collision_margin_) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 void HumanoidIK::filter_adjacent_collision_pairs() {

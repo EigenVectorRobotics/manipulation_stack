@@ -1,6 +1,7 @@
 #include "core/interfaces.h"
 
 #include <iostream>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <pinocchio/parsers/urdf.hpp>
@@ -26,6 +27,8 @@ struct Humanoid::Impl {
 
     pinocchio::Data data;
 
+    std::mutex data_mutex;
+
     Eigen::VectorXd q;
     Eigen::VectorXd v;
     Eigen::VectorXd e;
@@ -42,15 +45,18 @@ struct Humanoid::Impl {
     std::unique_ptr<ImpedanceController> controller;
     std::unique_ptr<VisualServoPlanner> motion_planner;
 
+    double collision_margin = 0.0;
+
     void initialize(){
         data = pinocchio::Data(model);
-        ik = std::make_shared<HumanoidIK>(model, geom);
+        ik = std::make_shared<HumanoidIK>(model, geom, collision_margin);
         // controller = std::make_unique<IKTrajTracker>(model, ik);
         controller = std::make_unique<ImpedanceController>(model);
         motion_planner = std::make_unique<VisualServoPlanner>(model, ik);
     }
 
     JointState grav_ff(JointState current_state){
+        std::lock_guard<std::mutex> lock(data_mutex);
 
         std::tie(q,v,e) = jointstate_to_vectors(current_state, model);
 
@@ -64,6 +70,8 @@ struct Humanoid::Impl {
         const JointState& current_state,
         const std::vector<double>& acceleration
     ){
+        std::lock_guard<std::mutex> lock(data_mutex);
+
         JointState padded = current_state;
         padded.position.resize(padded.name.size(), 0.0);
         padded.velocity.resize(padded.name.size(), 0.0);
@@ -149,6 +157,7 @@ Humanoid::Humanoid(
 
     apply_joint_limit_overrides();
     apply_joint_dynamics();
+    impl_->collision_margin = collision_margin_;
     impl_->initialize();
 
 }
@@ -390,6 +399,8 @@ Eigen::MatrixXd Humanoid::forward_kinematics(
     const Eigen::VectorXd& q,
     const bool left
 ){
+    std::lock_guard<std::mutex> lock(impl_->data_mutex);
+
     pinocchio::framesForwardKinematics(impl_->model, impl_->data, q);
 
     return left

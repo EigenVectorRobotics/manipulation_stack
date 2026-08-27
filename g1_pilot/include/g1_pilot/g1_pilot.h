@@ -184,6 +184,9 @@ protected:
 
     std::vector<std::string> locked_joints_;
 
+    /// Negative tolerates interpenetration; see collision_margin in g1.yaml.
+    double collision_margin_ = 0.0;
+
     struct JointLimit {
         double lower;
         double upper;

@@ -59,6 +59,9 @@ void Humanoid::extract_config() {
     left_ee_ = parse_ee(ees["left"]);
     right_ee_ = parse_ee(ees["right"]);
 
+    collision_margin_ = config["collision_margin"]
+        ? config["collision_margin"].as<double>() : 0.0;
+
     joint_dynamics_.clear();
     joint_dynamics_default_ = JointDynamics();
     YAML::Node dyn = config["joint_dynamics"];
