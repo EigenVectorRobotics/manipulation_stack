@@ -86,6 +86,11 @@ if(BUILD_TESTING)
 
     add_executable(test_mp_ik test/arm_mp/test_traj_gen.cpp)
     target_link_libraries(test_mp_ik PRIVATE g1_pilot GTest::gtest_main)
+    # The default RobotConfig paths are relative and only resolve from one
+    # specific working directory; give the tests absolute ones instead.
+    target_compile_definitions(test_mp_ik PRIVATE
+        G1_ASSET_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../g1_description/assets/g1/"
+        G1_CONFIG_FILE="${CMAKE_CURRENT_SOURCE_DIR}/config/g1.yaml")
 
     # add_executable(math_unittest test/arm_mp/math_unittest.cpp)
     # add_executable(line_unittest test/arm_mp/line_unittest.cpp)

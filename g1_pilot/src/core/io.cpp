@@ -59,6 +59,35 @@ void Humanoid::extract_config() {
     left_ee_ = parse_ee(ees["left"]);
     right_ee_ = parse_ee(ees["right"]);
 
+    joint_dynamics_.clear();
+    joint_dynamics_default_ = JointDynamics();
+    YAML::Node dyn = config["joint_dynamics"];
+    if (dyn) {
+        auto parse_dyn = [](const YAML::Node& n, JointDynamics base) {
+            if (n["armature"]) base.armature = n["armature"].as<double>();
+            if (n["damping"])  base.damping  = n["damping"].as<double>();
+            if (n["friction"]) base.friction = n["friction"].as<double>();
+            return base;
+        };
+        if (dyn["default"]) {
+            joint_dynamics_default_ = parse_dyn(dyn["default"], JointDynamics());
+        }
+        for (const auto& kv : dyn["categories"]) {
+            const std::string cat = kv.first.as<std::string>();
+            YAML::Node joints = categories[cat];
+            if (!joints) {
+                throw std::runtime_error(
+                    "[Humanoid] joint_dynamics.categories references unknown category '" + cat + "'");
+            }
+            const JointDynamics d = parse_dyn(kv.second, joint_dynamics_default_);
+            for (const auto& j : joints) joint_dynamics_[j.as<std::string>()] = d;
+        }
+        for (const auto& kv : dyn["joints"]) {
+            joint_dynamics_[kv.first.as<std::string>()] =
+                parse_dyn(kv.second, joint_dynamics_default_);
+        }
+    }
+
     joint_limit_overrides_.clear();
     YAML::Node overrides = config["joint_limit_overrides"];
     for (const auto& kv : overrides) {

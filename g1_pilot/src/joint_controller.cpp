@@ -89,7 +89,12 @@ public:
             std::bind(&TrajectoryControllerActionServer::handle_accepted_, this, std::placeholders::_1));
 
         /* Control loop timer */
-        control_loop_ = this->create_wall_timer(50ms, std::bind(&TrajectoryControllerActionServer::controller_, this));
+        this->declare_parameter<double>("control_period", 0.01);
+        const auto control_period = std::chrono::duration<double>(
+            this->get_parameter("control_period").as_double());
+        control_loop_ = this->create_wall_timer(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(control_period),
+            std::bind(&TrajectoryControllerActionServer::controller_, this));
 
         RCLCPP_INFO(this->get_logger(), "Trajectory controller action server ready");
     }

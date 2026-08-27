@@ -15,6 +15,8 @@
 
 namespace HumanoidPilot {
 
+constexpr double COULOMB_VEL_EPS = 1e-3;
+
 struct Humanoid::Impl {
     pinocchio::Model model_full;
     pinocchio::Model model;
@@ -31,6 +33,10 @@ struct Humanoid::Impl {
     Eigen::VectorXd grav_torques;
     Eigen::VectorXd a;
     Eigen::VectorXd ff_torques;
+
+    Eigen::VectorXd armature;
+    Eigen::VectorXd damping;
+    Eigen::VectorXd friction;
 
     std::shared_ptr<HumanoidIK> ik;
     std::unique_ptr<ImpedanceController> controller;
@@ -74,6 +80,12 @@ struct Humanoid::Impl {
         }
 
         ff_torques = pinocchio::rnea(model, data, q, v, a);
+
+        if (armature.size() == ff_torques.size()) {
+            ff_torques.array() += armature.array() * a.array()
+                                + damping.array() * v.array()
+                                + friction.array() * (v.array() / COULOMB_VEL_EPS).tanh();
+        }
 
         return vectors_to_jointstate(q, v, ff_torques, model);
     }
@@ -136,6 +148,7 @@ Humanoid::Humanoid(
     );
 
     apply_joint_limit_overrides();
+    apply_joint_dynamics();
     impl_->initialize();
 
 }
@@ -154,6 +167,23 @@ void Humanoid::apply_joint_limit_overrides() {
         int idx = impl_->model.joints[impl_->model.getJointId(joint_name)].idx_q();
         impl_->model.lowerPositionLimit(idx) = lim.lower;
         impl_->model.upperPositionLimit(idx) = lim.upper;
+    }
+}
+
+void Humanoid::apply_joint_dynamics() {
+    const auto& model = impl_->model;
+    impl_->armature = Eigen::VectorXd::Zero(model.nv);
+    impl_->damping  = Eigen::VectorXd::Zero(model.nv);
+    impl_->friction = Eigen::VectorXd::Zero(model.nv);
+
+    for (int joint_id = 1; joint_id < model.njoints; ++joint_id) {
+        const auto it = joint_dynamics_.find(model.names[joint_id]);
+        const JointDynamics& d =
+            (it != joint_dynamics_.end()) ? it->second : joint_dynamics_default_;
+        const int iv = model.joints[joint_id].idx_v();
+        impl_->armature(iv) = d.armature;
+        impl_->damping(iv)  = d.damping;
+        impl_->friction(iv) = d.friction;
     }
 }
 

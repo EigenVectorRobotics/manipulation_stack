@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <mutex>
 #include <unordered_map>
 
 using namespace HumanoidPilot;
@@ -145,11 +146,14 @@ private:
     ArmTrajectory left_traj_;
     ArmTrajectory right_traj_;
     JointState current_state_;
+    std::mutex feedback_mutex_;
 
     rclcpp::Time last_left_goal_time_;
     rclcpp::Time last_right_goal_time_;
 
     void controller_(){
+
+        std::lock_guard<std::mutex> lock(feedback_mutex_);
 
         // Wait until first feedback message initializes the configuration
         if (current_state_.name.size() == 0){
@@ -321,9 +325,18 @@ private:
             return;
         }
 
+        JointState start_state;
+        {
+            std::lock_guard<std::mutex> lock(feedback_mutex_);
+            if (current_state_.name.empty()) {
+                RCLCPP_ERROR(this->get_logger(), "No joint feedback yet — cannot plan");
+                return;
+            }
+            start_state = current_state_;
+        }
+
         arm_handle_->setLeftArm(left);
-        auto traj = arm_handle_->planTrajectory(
-            &goal_, left ? &left_ee_pose_ : &right_ee_pose_);
+        auto traj = arm_handle_->planTrajectory(start_state, goal_);
 
         if (traj.position.empty() || traj.position.front().empty()){
             RCLCPP_ERROR(this->get_logger(), "Trajectory planning failed: empty trajectory");
@@ -348,6 +361,7 @@ private:
 
     void handle_new_feedback_(sensor_msgs::msg::JointState::UniquePtr msg){
 
+        std::lock_guard<std::mutex> lock(feedback_mutex_);
         current_state_.name = msg->name;
         current_state_.position = msg->position;
         current_state_.velocity = msg->velocity;

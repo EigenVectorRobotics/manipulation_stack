@@ -12,6 +12,7 @@
 #include <mutex>
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
+#include "sensor_msgs/msg/joint_state.hpp"
 #include "humanoid_manipulation_interfaces/srv/plan_joint_trajectory.hpp"
 
 using namespace HumanoidPilot;
@@ -55,7 +56,18 @@ public:
         path_pub_ = this->create_publisher<nav_msgs::msg::Path>(
             this->get_parameter("traj_topic").as_string(), 10);
 
-        /* EE pose subscribers — used as the live start pose for planning */
+        this->declare_parameter<std::string>("feedback_topic", "feedback");
+        feedback_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+            this->get_parameter("feedback_topic").as_string(), 10,
+            [this](sensor_msgs::msg::JointState::UniquePtr msg){
+                std::lock_guard<std::mutex> lock(feedback_mutex_);
+                current_state_.name = msg->name;
+                current_state_.position = msg->position;
+                current_state_.velocity = msg->velocity;
+                current_state_.effort = msg->effort;
+            });
+
+        /* EE pose subscribers — published for visualisation//diagnostics */
         this->declare_parameter<std::string>("left_ee_pose_topic", "/left_ee_pose");
         this->declare_parameter<std::string>("right_ee_pose_topic", "/right_ee_pose");
 
@@ -97,6 +109,10 @@ private:
     // EE pose subscribers + latest-pose cache
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr left_ee_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr right_ee_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr feedback_sub_;
+    std::mutex feedback_mutex_;
+    JointState current_state_;
+
     std::mutex ee_pose_mutex_;
     geometry_msgs::msg::PoseStamped left_ee_pose_;
     geometry_msgs::msg::PoseStamped right_ee_pose_;
@@ -128,33 +144,28 @@ private:
         RCLCPP_INFO(this->get_logger(), "Received request for goal in frame: %s",
                      request->target_pose.header.frame_id.c_str());
 
-        geometry_msgs::msg::PoseStamped live_start_pose;
+        JointState start_state;
         {
-            std::lock_guard<std::mutex> lock(ee_pose_mutex_);
-            const bool have_pose = request->left_arm ? have_left_ee_pose_ : have_right_ee_pose_;
-            if (!have_pose) {
+            std::lock_guard<std::mutex> lock(feedback_mutex_);
+            if (current_state_.name.empty()) {
                 RCLCPP_ERROR(this->get_logger(),
-                    "No %s EE pose received yet — cannot plan",
-                    request->left_arm ? "left" : "right");
+                    "No joint feedback received yet — cannot plan");
                 response->success = false;
                 return;
             }
-            live_start_pose = request->left_arm ? left_ee_pose_ : right_ee_pose_;
+            start_state = current_state_;
         }
 
         Eigen::MatrixXd goal_matrix = get_pose_in_pelvis_(request->target_pose);
-        Eigen::MatrixXd start_matrix = get_pose_in_pelvis_(live_start_pose);
-
-        if (goal_matrix.size() == 0 || start_matrix.size() == 0) {
-            RCLCPP_ERROR(this->get_logger(), "Failed to transform poses to pelvis frame");
+        if (goal_matrix.size() == 0) {
+            RCLCPP_ERROR(this->get_logger(), "Failed to transform goal pose to pelvis frame");
             response->success = false;
             return;
         }
 
         arm_handle_->setLeftArm(request->left_arm);
 
-        auto joint_trajectory = arm_handle_->planTrajectory(
-                &goal_matrix, &start_matrix);
+        auto joint_trajectory = arm_handle_->planTrajectory(start_state, goal_matrix);
 
         std::vector<Eigen::VectorXd> joint_traj = toJointConfigs(joint_trajectory);
 

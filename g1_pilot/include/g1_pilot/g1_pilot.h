@@ -175,6 +175,7 @@ protected:
     void extract_config();
     void add_end_effector_frames();
     void apply_joint_limit_overrides();
+    void apply_joint_dynamics();
 
     RobotConfig robot_config_;
 
@@ -188,6 +189,15 @@ protected:
         double upper;
     };
     std::map<std::string, JointLimit> joint_limit_overrides_;
+
+    /// Motor-side dynamics absent from the URDF; see joint_dynamics in g1.yaml.
+    struct JointDynamics {
+        double armature = 0.0;
+        double damping = 0.0;
+        double friction = 0.0;
+    };
+    JointDynamics joint_dynamics_default_;
+    std::map<std::string, JointDynamics> joint_dynamics_;
 
 };
 

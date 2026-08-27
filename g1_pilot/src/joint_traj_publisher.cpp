@@ -74,8 +74,12 @@ public:
             this->get_parameter("feedback_topic").as_string(), 10,
             std::bind(&JointTrajPublisher::handle_feedback_, this, std::placeholders::_1));
 
+        this->declare_parameter<double>("control_period", 0.01);
+        const auto control_period = std::chrono::duration<double>(
+            this->get_parameter("control_period").as_double());
         control_loop_ = this->create_wall_timer(
-            50ms, std::bind(&JointTrajPublisher::controller_, this));
+            std::chrono::duration_cast<std::chrono::nanoseconds>(control_period),
+            std::bind(&JointTrajPublisher::controller_, this));
 
         RCLCPP_INFO(this->get_logger(),
             "Joint Traj Publisher ready (arm: %s)", left_arm_ ? "left" : "right");

@@ -28,13 +28,13 @@ def generate_launch_description():
                               default_value='/plan_trajectory'),
         DeclareLaunchArgument('control_trajectory_action',
                               default_value='/trajectory_controller'),
-        DeclareLaunchArgument('arm_safety_distance_x', default_value='-0.01'),
+        DeclareLaunchArgument('arm_safety_distance_x', default_value='-0.0'),
         DeclareLaunchArgument('arm_safety_distance_y', default_value='0.0'),
-        DeclareLaunchArgument('arm_safety_distance_z', default_value='0.03'),
+        DeclareLaunchArgument('arm_safety_distance_z', default_value='0.0'),
 
         # g1_pilot controller / plan_trajectory
         DeclareLaunchArgument('namespace', default_value=''),
-        DeclareLaunchArgument('PublishTF', default_value='false',
+        DeclareLaunchArgument('PublishTF', default_value='true',
                               description='Whether to include display.launch.py for TF publishing'),
         DeclareLaunchArgument('feedback_topic', default_value='feedback'),
         DeclareLaunchArgument('position_control_topic',
