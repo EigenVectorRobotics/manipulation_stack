@@ -195,6 +195,21 @@ void HumanoidIK::setup_optimization() {
         Err_R
     );
 
+    std::vector<casadi_int> waist_q_idx;
+    for (pinocchio::JointIndex j = 1; j < static_cast<pinocchio::JointIndex>(cmodel.njoints); ++j) {
+        if (cmodel.names[j].find("waist") == std::string::npos) continue;
+        const int idx_q = cmodel.idx_qs[j];
+        const int nq_j = cmodel.nqs[j];
+        for (int k = 0; k < nq_j; ++k) {
+            waist_q_idx.push_back(static_cast<casadi_int>(idx_q + k));
+        }
+    }
+
+    casadi::SX waist_cost = casadi::SX::zeros(1, 1);
+    if (!waist_q_idx.empty()) {
+        waist_cost = 0.1 * casadi::SX::sumsqr(cq(waist_q_idx));
+    }
+
     casadi::SX left_trans_err = Err_L(casadi::Slice(0,3),0);
     casadi::SX right_trans_err = Err_R(casadi::Slice(0,3),0);
     casadi::SX left_rot_err = Err_L(casadi::Slice(3,6),0);
@@ -210,21 +225,24 @@ void HumanoidIK::setup_optimization() {
             casadi::SX::sumsqr(right_rot_err)
         ) + 
         // 0.005 * casadi::SX::sumsqr(cq) +
-        0.1 * casadi::SX::sumsqr(cq - cq_last)
+        0.1 * casadi::SX::sumsqr(cq - cq_last) +
+        waist_cost
     );
 
     casadi::SX left_arm_cost = (
         50.0 * casadi::SX::sumsqr(left_trans_err) + 
         3.0 * casadi::SX::sumsqr(left_rot_err) + 
         // 0.005 * casadi::SX::sumsqr(cq) +
-        0.1 * casadi::SX::sumsqr(cq - cq_last)
+        0.1 * casadi::SX::sumsqr(cq - cq_last) +
+        waist_cost
     );
 
     casadi::SX right_arm_cost = (
         50.0 * casadi::SX::sumsqr(right_trans_err) + 
         3.0 * casadi::SX::sumsqr(right_rot_err) + 
         // 0.005 * casadi::SX::sumsqr(cq) +
-        0.1 * casadi::SX::sumsqr(cq - cq_last)
+        0.1 * casadi::SX::sumsqr(cq - cq_last) +
+        waist_cost
     );
 
     // Functions

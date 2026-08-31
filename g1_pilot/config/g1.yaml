@@ -121,6 +121,14 @@ configs:
       waist_yaw_joint:            {lower: -0.0001, upper:  0.0001}
       waist_roll_joint:           {lower: -0.0001, upper:  0.0001}
       waist_pitch_joint:          {lower: -0.0001, upper:  0.0001}
+
+    joint_dynamics:
+      default: {armature: 0.01, damping: 0.05, friction: 0.2}
+      categories:
+        left_wrist:  {armature: 0.01, damping: 0.05, friction: 0.1}
+        right_wrist: {armature: 0.01, damping: 0.05, friction: 0.1}
+        
+    collision_margin: -0.01
     end_effectors:
       left:
         parent_joint: left_wrist_yaw_joint
@@ -161,4 +169,4 @@ configs:
         offset: [0.2108, -0.0046, 0.0285]
 
 # Name of the profile (from `configs` above) that is currently active.
-active_config: arms_locked_waist
+active_config: arms_with_waist
