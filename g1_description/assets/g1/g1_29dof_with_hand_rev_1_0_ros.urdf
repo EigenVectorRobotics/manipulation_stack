@@ -571,7 +571,7 @@
   <!-- mid360 -->
   <link name="sensor"></link>
   <joint name="mid360_joint" type="fixed">
-    <origin xyz="-0.0002835 -0.00003 -0.41618" rpy="0 -0.04014257279586953 0"/>
+    <origin xyz="-0.00016531 -0.00003 -0.415852" rpy="0 -0.04014257279586953 0"/>
     <parent link="sensor"/>
     <child link="torso_link"/>
   </joint>
