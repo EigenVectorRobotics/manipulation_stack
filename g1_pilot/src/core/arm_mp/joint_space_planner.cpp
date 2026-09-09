@@ -33,17 +33,7 @@ constexpr std::size_t MAX_EXPECTED_WAYPOINTS = 256;
 constexpr double PATH_EPS = 1e-9;
 constexpr int GRID_PER_WAYPOINT = 20;
 constexpr int MIN_GRID_POINTS = 200;
-
-/**
- * @brief Number of warm-started IK solves used to place one target pose.
- *
- * The IK cost carries a 0.1 * ||q - q_last||^2 proximity term. On the first
- * solve q_last is the measured start configuration, which biases the solution
- * away from the target; re-solving drives q_last to the solution itself and
- * the bias vanishes. Five passes reach the residual floor set by the posture
- * regulariser.
- */
-constexpr int IK_REFINEMENT_PASSES = 5;
+constexpr double FIXED_JOINT_RANGE = 1e-3;
 
 /**
  * @brief Natural cubic spline through the waypoints, parameterised by
@@ -236,6 +226,15 @@ struct JointSpacePlanner::RRTData {
         planner->setProblemDefinition(pdef);
     }
 
+    void setBounds(const Eigen::VectorXd& lower, const Eigen::VectorXd& upper) {
+        for (int i = 0; i < lower.size(); ++i) {
+            bounds.setLow(i, lower(i));
+            bounds.setHigh(i, upper(i));
+        }
+        space->setBounds(bounds);
+        space->setup();
+    }
+
     void setQuery(const Eigen::VectorXd& start_q, const Eigen::VectorXd& goal_q) {
         for (int i = 0; i < start_q.size(); ++i) {
             start[i] = start_q(i);
@@ -263,7 +262,8 @@ JointSpacePlanner::JointSpacePlanner(
     double rewire_factor,
     double solve_time_seconds,
     double goal_tolerance,
-    double validity_resolution
+    double validity_resolution,
+    double cost_threshold_factor
 ) :
     model_(model),
     data_(model_),
@@ -277,7 +277,8 @@ JointSpacePlanner::JointSpacePlanner(
     rewire_factor_(rewire_factor),
     solve_time_seconds_(solve_time_seconds),
     goal_tolerance_(goal_tolerance),
-    validity_resolution_(validity_resolution)
+    validity_resolution_(validity_resolution),
+    cost_threshold_factor_(cost_threshold_factor)
 {
     if (ik_handle_ == nullptr) {
         throw std::runtime_error("JointSpacePlanner: ik_handle is null");
@@ -316,6 +317,7 @@ JointSpacePlanner::~JointSpacePlanner() {}
 
 JointState JointSpacePlanner::poseToJointConfig(
     const Eigen::MatrixXd& pose,
+    const int refinement_passes,
     const JointState* reference_pose
 ) {
     if (pose.rows() != 4 || pose.cols() != 4) {
@@ -330,7 +332,7 @@ JointState JointSpacePlanner::poseToJointConfig(
         &pos_err, &rot_err
     );
 
-    for (int pass = 1; pass < IK_REFINEMENT_PASSES; ++pass) {
+    for (int pass = 1; pass < refinement_passes; ++pass) {
         js = ik_handle_->solve_ik(
             pose, left_arm_,
             nullptr, nullptr,
@@ -363,6 +365,10 @@ bool JointSpacePlanner::runRRTStar(
     }
 
     rrt_->reset();
+
+    const double direct = rrt_->si->distance(rrt_->start.get(), rrt_->goal.get());
+    rrt_->objective->setCostThreshold(
+        ob::Cost(std::max(cost_threshold_factor_ * direct, PATH_EPS)));
 
     ob::PlannerStatus status = rrt_->planner->solve(
         ob::timedPlannerTerminationCondition(solve_time_seconds_));
@@ -552,7 +558,7 @@ JointSpacePlanner::planPath(
     const Eigen::MatrixXd& start_pose
 ) {
     std::cout << "IK for start pose:" << std::endl;
-    JointState start_state = poseToJointConfig(start_pose);
+    JointState start_state = poseToJointConfig(start_pose, 3);
     if (start_state.position.size() == 0)
         return {};
 
@@ -567,13 +573,34 @@ JointSpacePlanner::planPath(
     const Eigen::MatrixXd& goal_pose
 ) {
     std::cout << "IK for goal pose:" << std::endl;
-    JointState goal_state = poseToJointConfig(goal_pose, &start_state);
+    JointState goal_state = poseToJointConfig(goal_pose, 2, &start_state);
     if (goal_state.position.size() == 0)
         return {};
 
     (void) planPath(start_state, goal_state);
 
     return {waypoints_, configsToPoses(waypoints_)};
+}
+
+void JointSpacePlanner::updateActiveJoints() {
+    joint_moves_.assign(model_.njoints, false);
+    q_moves_.assign(nq_, false);
+
+    const auto ee_id = left_arm_ ? left_ee_id_ : right_ee_id_;
+    for (auto j = model_.frames[ee_id].parentJoint; j != 0; j = model_.parents[j]) {
+        const int idx_q = model_.joints[j].idx_q();
+        const int nq_j = model_.joints[j].nq();
+
+        double range = 0.0;
+        for (int k = 0; k < nq_j; ++k) {
+            range = std::max(range,
+                model_.upperPositionLimit(idx_q + k) - model_.lowerPositionLimit(idx_q + k));
+        }
+        if (range <= FIXED_JOINT_RANGE) continue;
+
+        joint_moves_[j] = true;
+        for (int k = 0; k < nq_j; ++k) q_moves_[idx_q + k] = true;
+    }
 }
 
 std::vector<Eigen::VectorXd>
@@ -597,7 +624,22 @@ JointSpacePlanner::planPath(
     start_q_ = start_q_.cwiseMax(model_.lowerPositionLimit).cwiseMin(model_.upperPositionLimit);
     goal_q_ = goal_q_.cwiseMax(model_.lowerPositionLimit).cwiseMin(model_.upperPositionLimit);
 
-    (void) runRRTStar(start_q_, goal_q_, waypoints_);
+    updateActiveJoints();
+
+    Eigen::VectorXd lower = model_.lowerPositionLimit;
+    Eigen::VectorXd upper = model_.upperPositionLimit;
+    for (int i = 0; i < nq_; ++i) {
+        if (q_moves_[i]) continue;
+        goal_q_(i) = start_q_(i);
+        lower(i) = start_q_(i);
+        upper(i) = start_q_(i);
+    }
+    rrt_->setBounds(lower, upper);
+
+    ik_handle_->set_active_joints(joint_moves_);
+    const bool solved = runRRTStar(start_q_, goal_q_, waypoints_);
+    ik_handle_->reset_active_collision_pairs();
+    (void) solved;
 
     return waypoints_;
 }
@@ -611,7 +653,7 @@ JointSpacePlanner::planTrajectory(
     double max_joint_acc
 ) {
     std::cout << "IK for start pose:" << std::endl;
-    JointState start_state = poseToJointConfig(start_pose);
+    JointState start_state = poseToJointConfig(start_pose, 3);
     if (start_state.position.size() == 0)
         return {};
 
@@ -628,7 +670,7 @@ JointSpacePlanner::planTrajectory(
     double max_joint_acc
 ){
     std::cout << "IK for goal pose:" << std::endl;
-    JointState goal_state = poseToJointConfig(goal_pose, &start_state);
+    JointState goal_state = poseToJointConfig(goal_pose, 2, &start_state);
     if (goal_state.position.size() == 0)
         return {};
 

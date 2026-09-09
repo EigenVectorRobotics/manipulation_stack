@@ -12,13 +12,14 @@ class VisualServoPlanner : public JointSpacePlanner {
             std::shared_ptr<HumanoidIK> ik_handle,
             bool left_arm = false,
             double approach_offset = 0.05,
-            int final_leg_steps = 20,
+            int final_leg_steps = 8,
             double step_size = 0.05,
             double goal_bias = 0.1,
             double rewire_factor = 1.1,
             double solve_time_seconds = 1.0,
             double goal_tolerance = 0.01,
-            double validity_resolution = 0.005
+            double validity_resolution = 0.005,
+            double cost_threshold_factor = 2.0
         );
         virtual ~VisualServoPlanner();
 

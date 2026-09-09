@@ -47,6 +47,9 @@ public:
     );
 
     bool check_collision(const Eigen::VectorXd& q);
+    void set_active_joints(const std::vector<bool>& joint_moves);
+    void reset_active_collision_pairs();
+    std::size_t active_collision_pair_count() const;
 
     void reset();
 

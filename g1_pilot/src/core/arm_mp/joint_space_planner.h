@@ -27,7 +27,8 @@ class JointSpacePlanner {
             double rewire_factor = 1.1,
             double solve_time_seconds = 1.0,
             double goal_tolerance = 0.01,
-            double validity_resolution = 0.005
+            double validity_resolution = 0.005,
+            double cost_threshold_factor = 2.0
         );
         virtual ~JointSpacePlanner();
 
@@ -106,8 +107,11 @@ class JointSpacePlanner {
             double max_joint_acc
         );
 
+        void updateActiveJoints();
+
         JointState poseToJointConfig(
             const Eigen::MatrixXd& pose,
+            const int refinement_passes = 5,
             const JointState* reference_pose = nullptr
         );
         Eigen::Matrix4d configToPose(const Eigen::VectorXd& q);
@@ -133,6 +137,7 @@ class JointSpacePlanner {
         double solve_time_seconds_;
         double goal_tolerance_;
         double validity_resolution_;
+        double cost_threshold_factor_;
 
         Eigen::VectorXd start_q_;
         Eigen::VectorXd goal_q_;
@@ -140,6 +145,9 @@ class JointSpacePlanner {
 
         std::vector<std::string> joint_names_;
         std::vector<int> joint_q_index_;
+
+        std::vector<bool> joint_moves_;   // by pinocchio joint id
+        std::vector<bool> q_moves_;       // by configuration index
 };
 
 } // namespace HumanoidPilot

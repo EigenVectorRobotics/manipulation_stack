@@ -14,6 +14,7 @@ namespace {
 // Below this start-to-goal distance the approach offset is skipped and the
 // goal is planned to directly.
 constexpr double DIRECT_APPROACH_DISTANCE = 0.05;
+constexpr int GOAL_REFINEMENT_PASSES = 2;
 
 } // namespace
 
@@ -28,11 +29,12 @@ VisualServoPlanner::VisualServoPlanner(
     double rewire_factor,
     double solve_time_seconds,
     double goal_tolerance,
-    double validity_resolution
+    double validity_resolution,
+    double cost_threshold_factor
 ) :
     JointSpacePlanner(model, ik_handle, left_arm, step_size, goal_bias,
                       rewire_factor, solve_time_seconds, goal_tolerance,
-                      validity_resolution)
+                      validity_resolution, cost_threshold_factor)
 {
     intermediate_pose_offset_ = Eigen::Matrix4d::Identity();
     intermediate_pose_offset_(0, 3) = -approach_offset;
@@ -80,9 +82,23 @@ void VisualServoPlanner::appendFinalLeg(
     const Eigen::MatrixXd& goal_pose,
     std::vector<Eigen::VectorXd>& joints
 ) {
-    for (const auto& rel : final_leg_) {
-        Eigen::Matrix4d T_abs = goal_pose * rel;
-        JointState js = poseToJointConfig(T_abs);
+    JointState seed;
+    bool have_seed = false;
+    if (!joints.empty()) {
+        seed = vectors_to_jointstate(
+            joints.back(),
+            Eigen::VectorXd::Zero(model_.nv),
+            Eigen::VectorXd::Zero(model_.nv),
+            model_
+        );
+        have_seed = true;
+    }
+
+    for (std::size_t i = 0; i < final_leg_.size(); ++i) {
+        Eigen::Matrix4d T_abs = goal_pose * final_leg_[i];
+        const int passes =
+            (i + 1 == final_leg_.size()) ? GOAL_REFINEMENT_PASSES : 1;
+        JointState js = poseToJointConfig(T_abs, passes, have_seed ? &seed : nullptr);
         if (js.position.size() == 0) {
             std::cout << "[VisualServoPlanner] final-leg IK failed; truncating" << std::endl;
             break;
@@ -92,6 +108,8 @@ void VisualServoPlanner::appendFinalLeg(
             jointstate_to_vectors(js, model_);
 
         joints.push_back(leg_q_);
+        seed = js;
+        have_seed = true;
     }
 }
 
@@ -141,7 +159,7 @@ VisualServoPlanner::planTrajectory(
 
     // Phase 1: RRT* to the intermediate pose. Call the base planPath explicitly
     // so we don't recurse into our own override.
-    JointState intermediate_state = poseToJointConfig(intermediate_mat, &start_state);
+    JointState intermediate_state = poseToJointConfig(intermediate_mat, 2, &start_state);
     if (intermediate_state.position.size() == 0) return {};
 
     (void) JointSpacePlanner::planPath(start_state, intermediate_state);

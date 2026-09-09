@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <fstream>
+#include <set>
 #include <iostream>
 #include <iomanip>
 #include <stdexcept>
@@ -121,6 +122,7 @@ bool HumanoidIK::check_collision(const Eigen::VectorXd& q) {
     if (!any_contact || collision_margin_ >= 0.0) return any_contact;
 
     for (std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k) {
+        if (!geom_data_.activeCollisionPairs[k]) continue;
         const auto& result = geom_data_.collisionResults[k];
         if (!result.isCollision()) continue;
         for (std::size_t c = 0; c < result.numContacts(); ++c) {
@@ -152,6 +154,53 @@ void HumanoidIK::filter_adjacent_collision_pairs() {
     }
     
     geom_model_.collisionPairs = filtered_pairs;
+}
+
+void HumanoidIK::set_active_joints(const std::vector<bool>& joint_moves) {
+    // Joints between a body and the kinematic root.
+    const auto ancestors = [this](pinocchio::JointIndex j) {
+        std::set<pinocchio::JointIndex> out;
+        while (j != 0) { out.insert(j); j = model_.parents[j]; }
+        return out;
+    };
+
+    std::vector<std::set<pinocchio::JointIndex>> chain(model_.njoints);
+    for (int j = 0; j < model_.njoints; ++j) {
+        chain[j] = ancestors(static_cast<pinocchio::JointIndex>(j));
+    }
+
+    for (std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k) {
+        const auto& cp = geom_model_.collisionPairs[k];
+        const auto j1 = geom_model_.geometryObjects[cp.first].parentJoint;
+        const auto j2 = geom_model_.geometryObjects[cp.second].parentJoint;
+
+        bool can_change = false;
+        for (const auto j : chain[j1]) {
+            if (chain[j2].count(j)) continue;
+            if (j < joint_moves.size() && joint_moves[j]) { can_change = true; break; }
+        }
+        if (!can_change) {
+            for (const auto j : chain[j2]) {
+                if (chain[j1].count(j)) continue;
+                if (j < joint_moves.size() && joint_moves[j]) { can_change = true; break; }
+            }
+        }
+
+        if (can_change) geom_data_.activateCollisionPair(k);
+        else            geom_data_.deactivateCollisionPair(k);
+    }
+}
+
+void HumanoidIK::reset_active_collision_pairs() {
+    for (std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k) {
+        geom_data_.activateCollisionPair(k);
+    }
+}
+
+std::size_t HumanoidIK::active_collision_pair_count() const {
+    std::size_t n = 0;
+    for (const bool active : geom_data_.activeCollisionPairs) n += active ? 1 : 0;
+    return n;
 }
 
 void HumanoidIK::setup_optimization() {
@@ -302,10 +351,14 @@ void HumanoidIK::setup_optimization() {
     opts["ipopt.sb"] = "yes";
     opts["ipopt.print_level"] = 0;
     opts["ipopt.max_iter"] = 50;
-    opts["ipopt.tol"] = 1e-6;
-    opts["ipopt.acceptable_tol"] = 5e-4;
-    opts["ipopt.acceptable_iter"] = 5;
+    opts["ipopt.tol"] = 1e-5;
+    opts["ipopt.acceptable_tol"] = 1e-4;
+    opts["ipopt.acceptable_iter"] = 3;
     opts["ipopt.warm_start_init_point"] = "yes";
+    opts["ipopt.warm_start_bound_push"] = 1e-9;
+    opts["ipopt.warm_start_slack_bound_push"] = 1e-9;
+    opts["ipopt.warm_start_mult_bound_push"] = 1e-9;
+    opts["ipopt.mu_strategy"] = "adaptive";
     opts["ipopt.derivative_test"] = "none";
     opts["ipopt.jacobian_approximation"] = "exact";
     
@@ -465,7 +518,7 @@ JointState HumanoidIK::solve_ik(
 
     // Solve optimization problem
     std::vector<double> sol_q_vec;
-    
+
     try {
         if (left){
             casadi::OptiSol sol = cd->opti_l_.solve();
