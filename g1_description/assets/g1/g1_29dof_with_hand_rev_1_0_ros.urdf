@@ -560,10 +560,14 @@
   </joint>
 
   <!-- d435 -->
+  <!-- Bottom 2 lines are sensor -> camera_link tf. First one is from camera lidar calib -->
+  <!-- <origin xyz="0.081743 0.019789 0.00520795" rpy="0.026430 0.351252 0.017755"/> -->
+  <!-- This is the best overall result with lidar->torso tf as xyz="0.016418778 -0.00003 -0.415856101" rpy="0 -0.04014257279586953 0" -->
+  <!-- <origin xyz="0.094326 0.033167 0.022271" rpy="0.011476 0.365297 -0.035170"/> -->
   <link name="camera_link"></link>
   <joint name="d435_joint" type="fixed">
-    <!--<origin xyz="0.0576235 0.01753 0.42987" rpy="0 0.8307767239493009 0"/>-->
-    <origin xyz="0.068042 0.016300 0.414516" rpy="-0.011720 0.453641 0.026073"/>
+    <!-- better for button pressing V -->
+     <origin xyz="0.081099 0.023467 0.414921" rpy="-0.005696 0.320641 -0.027792"/>
     <parent link="torso_link"/>
     <child link="camera_link"/>
   </joint>
@@ -571,7 +575,9 @@
   <!-- mid360 -->
   <link name="sensor"></link>
   <joint name="mid360_joint" type="fixed">
-    <origin xyz="-0.00016531 -0.00003 -0.415852" rpy="0 -0.04014257279586953 0"/>
+    <!-- from lidar cam calib <origin xyz="0.016418778 -0.00003 -0.415856101" rpy="0 -0.04014257279586953 0"/> -->
+    <!-- from the torso->cam tf and lidatr cam calib -->
+    <origin xyz="-0.011312 0.005899 -0.407630" rpy="0.031021 0.029913 0.035418"/>
     <parent link="sensor"/>
     <child link="torso_link"/>
   </joint>
