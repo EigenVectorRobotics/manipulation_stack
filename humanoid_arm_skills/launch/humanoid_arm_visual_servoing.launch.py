@@ -24,10 +24,8 @@ def generate_launch_description():
                               default_value='/left_ee_pose'),
         DeclareLaunchArgument('right_ee_pose_topic',
                               default_value='/right_ee_pose'),
-        DeclareLaunchArgument('plan_trajectory_service',
-                              default_value='/plan_trajectory'),
-        DeclareLaunchArgument('control_trajectory_action',
-                              default_value='/trajectory_controller'),
+        DeclareLaunchArgument('move_to_pose_action',
+                              default_value='/move_to_pose'),
         DeclareLaunchArgument('arm_safety_distance_x', default_value='-0.0'),
         DeclareLaunchArgument('arm_safety_distance_y', default_value='0.0'),
         DeclareLaunchArgument('arm_safety_distance_z', default_value='0.0'),
@@ -53,30 +51,18 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('PublishTF')),
     )
 
-    controller_launch = IncludeLaunchDescription(
+    move_to_pose_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([g1_pilot_share, 'launch',
-                                  'controller.launch.py'])
+                                  'move_to_pose.launch.py'])
         ),
         launch_arguments={
             'namespace': LaunchConfiguration('namespace'),
-            'PublishTF': 'false',
+            'move_to_pose_action': LaunchConfiguration('move_to_pose_action'),
             'feedback_topic': LaunchConfiguration('feedback_topic'),
-            'position_control_topic': LaunchConfiguration(
-                'position_control_topic'),
+            'position_control_topic': LaunchConfiguration('position_control_topic'),
             'left_ee_pose_topic': LaunchConfiguration('left_ee_pose_topic'),
             'right_ee_pose_topic': LaunchConfiguration('right_ee_pose_topic'),
-        }.items(),
-    )
-
-    plan_trajectory_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            PathJoinSubstitution([g1_pilot_share, 'launch',
-                                  'plan_trajectory.launch.py'])
-        ),
-        launch_arguments={
-            'namespace': LaunchConfiguration('namespace'),
-            'PublishTF': 'false',
             'traj_topic': LaunchConfiguration('traj_topic'),
         }.items(),
     )
@@ -110,10 +96,7 @@ def generate_launch_description():
                 'keyboard_input_topic'),
             'left_ee_pose_topic': LaunchConfiguration('left_ee_pose_topic'),
             'right_ee_pose_topic': LaunchConfiguration('right_ee_pose_topic'),
-            'plan_trajectory_service': LaunchConfiguration(
-                'plan_trajectory_service'),
-            'control_trajectory_action': LaunchConfiguration(
-                'control_trajectory_action'),
+            'move_to_pose_action': LaunchConfiguration('move_to_pose_action'),
             'arm_safety_distance_x': LaunchConfiguration(
                 'arm_safety_distance_x'),
             'arm_safety_distance_y': LaunchConfiguration(
@@ -125,8 +108,7 @@ def generate_launch_description():
 
     return LaunchDescription(args + [
         display_launch,
-        controller_launch,
-        plan_trajectory_launch,
+        move_to_pose_launch,
         pose_filter_node,
         servo_arm_node,
     ])
