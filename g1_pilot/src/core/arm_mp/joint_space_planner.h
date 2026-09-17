@@ -100,11 +100,20 @@ class JointSpacePlanner {
             std::vector<Eigen::VectorXd>& path
         );
 
+        /**
+         * @param start_velocity  measured joint velocity at the first
+         *        waypoint, or null to start from rest. Only the component
+         *        along the path can be honoured: the trajectory begins at the
+         *        path speed that best matches it, so a replan issued while the
+         *        arm is moving hands over without a stop. Clamped to whatever
+         *        still leaves room to brake to rest at the goal.
+         */
         JointTrajectory timeParameterize(
             const std::vector<Eigen::VectorXd>& waypoints,
             double time_step,
             double max_joint_vel,
-            double max_joint_acc
+            double max_joint_acc,
+            const Eigen::VectorXd* start_velocity = nullptr
         );
 
         void updateActiveJoints();
@@ -114,6 +123,24 @@ class JointSpacePlanner {
             const JointState& start_state,
             const int refinement_passes
         );
+
+        /**
+         * @brief True when the straight line between two configurations is
+         *        collision free at the planner's validity resolution.
+         */
+        bool motionValid(const Eigen::VectorXd& a, const Eigen::VectorXd& b);
+
+        /**
+         * @brief Make the roadmap match the joints this query may move.
+         *
+         * The roadmap is sampled inside the slice of configuration space the
+         * active arm can reach, so it survives from one query to the next: a
+         * replanned goal is a fresh graph search, not a fresh search tree.
+         * It is thrown away when the active joint set changes (the other arm),
+         * and merely revalidated when the joints held fixed have moved, since
+         * only edge validity depends on them.
+         */
+        void ensureSearchSpace(const Eigen::VectorXd& reference_q);
 
         static bool poseNear(
             const Eigen::Matrix4d& a,
@@ -162,6 +189,12 @@ class JointSpacePlanner {
 
         std::vector<bool> joint_moves_;   // by pinocchio joint id
         std::vector<bool> q_moves_;       // by configuration index
+
+        // What the standing roadmap was built for.
+        std::vector<bool> roadmap_q_moves_;
+        Eigen::VectorXd roadmap_fixed_q_;
+        bool roadmap_seeded_ = false;
+
 
         JointState cached_goal_state_;
         Eigen::Matrix4d cached_goal_pose_ = Eigen::Matrix4d::Identity();

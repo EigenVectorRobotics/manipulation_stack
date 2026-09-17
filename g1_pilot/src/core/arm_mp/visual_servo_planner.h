@@ -43,6 +43,15 @@ class VisualServoPlanner : public JointSpacePlanner {
             double max_joint_acc = 2.0
         ) override;
 
+        JointTrajectory
+        replanTrajectory(
+            const JointState& start_state,
+            const Eigen::MatrixXd& goal_pose,
+            double time_step = 0.01,
+            double max_joint_vel = 1.0,
+            double max_joint_acc = 2.0
+        );
+
     protected:
         std::vector<Eigen::Matrix4d> linearInterpolate(
             const Eigen::Matrix4d& T_from,
@@ -60,6 +69,12 @@ class VisualServoPlanner : public JointSpacePlanner {
         Eigen::Matrix4d intermediate_pose_offset_;
         std::vector<Eigen::Matrix4d> final_leg_;
         Eigen::VectorXd leg_q_;
+
+        std::vector<Eigen::VectorXd> last_search_;
+        Eigen::Matrix4d last_goal_pose_ = Eigen::Matrix4d::Identity();
+        Eigen::VectorXd last_start_q_;
+        bool last_plan_valid_ = false;
+        bool last_plan_left_ = false;
 };
 
 } // namespace HumanoidPilot

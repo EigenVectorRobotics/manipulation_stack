@@ -441,6 +441,29 @@ Eigen::VectorXd HumanoidIK::solve_ik_dls(
         JJt.diagonal().array() += DAMPING;
         dq.noalias() = -J.transpose() * JJt.ldlt().solve(err);
 
+        // A joint the step would drive past its limit contributes nothing but
+        // a clamp. Drop it and let the others take up the slack, which is the
+        // difference between converging and stalling a few millimetres out.
+        bool dropped = false;
+        for (int j = 1; j < model_.njoints; ++j) {
+            const int idx_q = model_.joints[j].idx_q();
+            const int idx_v = model_.joints[j].idx_v();
+            for (int k = 0; k < model_.joints[j].nv(); ++k) {
+                const double next = q(idx_q + k) + dq(idx_v + k);
+                if (next > model_.upperPositionLimit(idx_q + k)
+                    || next < model_.lowerPositionLimit(idx_q + k)) {
+                    J.col(idx_v + k).setZero();
+                    dropped = true;
+                }
+            }
+        }
+
+        if (dropped) {
+            JJt.noalias() = J * J.transpose();
+            JJt.diagonal().array() += DAMPING;
+            dq.noalias() = -J.transpose() * JJt.ldlt().solve(err);
+        }
+
         const double dq_norm = dq.norm();
         if (dq_norm > MAX_STEP) dq *= MAX_STEP / dq_norm;
 

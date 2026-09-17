@@ -13,7 +13,9 @@
 #include <ompl/geometric/PathGeometric.h>
 #include <ompl/geometric/PathSimplifier.h>
 #include <ompl/geometric/planners/rrt/RRTstar.h>
+#include <ompl/geometric/planners/prm/LazyPRMstar.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <iostream>
@@ -184,6 +186,7 @@ struct JointSpacePlanner::RRTData {
     std::shared_ptr<ob::SpaceInformation> si;
     std::shared_ptr<ob::ProblemDefinition> pdef;
     std::shared_ptr<og::RRTstar> planner;
+    std::shared_ptr<og::LazyPRMstar> roadmap;
     std::shared_ptr<ob::PathLengthOptimizationObjective> objective;
     std::shared_ptr<og::PathSimplifier> simplifier;
 
@@ -209,6 +212,7 @@ struct JointSpacePlanner::RRTData {
         si(std::make_shared<ob::SpaceInformation>(space)),
         pdef(std::make_shared<ob::ProblemDefinition>(si)),
         planner(std::make_shared<og::RRTstar>(si)),
+        roadmap(std::make_shared<og::LazyPRMstar>(si)),
         objective(std::make_shared<ob::PathLengthOptimizationObjective>(si)),
         simplifier(std::make_shared<og::PathSimplifier>(si)),
         start(space),
@@ -230,6 +234,18 @@ struct JointSpacePlanner::RRTData {
         planner->setGoalBias(goal_bias);
         planner->setRewireFactor(rewire_factor);
         planner->setProblemDefinition(pdef);
+
+        roadmap->setProblemDefinition(pdef);
+    }
+
+    // Point the problem definition at a new start/goal pair. The roadmap
+    // planner drops only its query milestones when the definition is set,
+    // which is the whole reason for using it here.
+    void newQuery() {
+        pdef->clearSolutionPaths();
+        pdef->clearStartStates();
+        pdef->clearGoal();
+        pdef->setStartAndGoalStates(start.get(), goal.get(), goal_tolerance);
     }
 
     void setBounds(const Eigen::VectorXd& lower, const Eigen::VectorXd& upper) {
@@ -369,6 +385,65 @@ JointState JointSpacePlanner::poseToJointConfig(
     return js;
 }
 
+void JointSpacePlanner::ensureSearchSpace(const Eigen::VectorXd& reference_q) {
+    // The joints this query may move decide the slice the roadmap lives in.
+    Eigen::VectorXd lower = model_.lowerPositionLimit;
+    Eigen::VectorXd upper = model_.upperPositionLimit;
+    for (int i = 0; i < nq_; ++i) {
+        if (q_moves_[i]) continue;
+        lower(i) = reference_q(i);
+        upper(i) = reference_q(i);
+    }
+
+    // Always re-pin: the held joints do shift a little between queries (the
+    // optimisation solver parks the waist on its limits), and a start state
+    // outside the bounds is discarded before the planner ever sees it.
+    rrt_->setBounds(lower, upper);
+
+    const bool same_slice = roadmap_seeded_ && roadmap_q_moves_ == q_moves_;
+
+    if (!same_slice) {
+        rrt_->roadmap->clear();
+        roadmap_q_moves_ = q_moves_;
+        roadmap_fixed_q_ = reference_q;
+        roadmap_seeded_ = false;
+        return;
+    }
+
+    // Same slice, but the joints being held fixed have moved: the graph is
+    // still the right shape, only the collision results cached on its edges
+    // are stale.
+    double fixed_drift = 0.0;
+    for (int i = 0; i < nq_; ++i) {
+        if (q_moves_[i]) continue;
+        fixed_drift = std::max(fixed_drift,
+            std::abs(reference_q(i) - roadmap_fixed_q_(i)));
+    }
+
+    if (fixed_drift > FIXED_JOINT_RANGE) {
+        std::cout << "[ensureSearchSpace] held joints moved " << fixed_drift
+                  << " rad; revalidating roadmap" << std::endl;
+        rrt_->roadmap->clearValidity();
+        roadmap_fixed_q_ = reference_q;
+    }
+}
+
+bool JointSpacePlanner::motionValid(
+    const Eigen::VectorXd& a,
+    const Eigen::VectorXd& b
+) {
+    if (a.size() != nq_ || b.size() != nq_) return false;
+
+    ob::ScopedState<ob::RealVectorStateSpace> sa(rrt_->space);
+    ob::ScopedState<ob::RealVectorStateSpace> sb(rrt_->space);
+    for (int i = 0; i < nq_; ++i) {
+        sa[i] = a(i);
+        sb[i] = b(i);
+    }
+
+    return rrt_->si->checkMotion(sa.get(), sb.get());
+}
+
 bool JointSpacePlanner::poseNear(
     const Eigen::Matrix4d& a,
     const Eigen::Matrix4d& b,
@@ -414,32 +489,74 @@ bool JointSpacePlanner::runRRTStar(
     rrt_->setQuery(start_q, goal_q);
 
     if (!rrt_->si->isValid(rrt_->start.get())) {
-        std::cout << "[runRRTStar] start state is in collision" << std::endl;
+        std::cout << "[runSearch] start state is in collision" << std::endl;
         path.resize(0);
         return false;
     }
     if (!rrt_->si->isValid(rrt_->goal.get())) {
-        std::cout << "[runRRTStar] goal state is in collision" << std::endl;
+        std::cout << "[runSearch] goal state is in collision" << std::endl;
         path.resize(0);
         return false;
     }
 
-    rrt_->reset();
-
+    // The straight line is the shortest path this metric admits, so
+    // "within cost_threshold_factor_ of it" is a meaningful stopping point.
     const double direct = rrt_->si->distance(rrt_->start.get(), rrt_->goal.get());
     rrt_->objective->setCostThreshold(
         ob::Cost(std::max(cost_threshold_factor_ * direct, PATH_EPS)));
 
-    ob::PlannerStatus status = rrt_->planner->solve(
-        ob::timedPlannerTerminationCondition(solve_time_seconds_));
-    if (status != ob::PlannerStatus::EXACT_SOLUTION) {
-        std::cout << "[runRRTStar] no exact solution (status="
-                  << status.asString() << ")" << std::endl;
+    ob::PathPtr solution;
+
+    // Query the standing roadmap. Only the start and goal milestones are new;
+    // everything else was built by earlier queries.
+    rrt_->newQuery();
+    rrt_->roadmap->setProblemDefinition(rrt_->pdef);
+
+    // LazyPRM grows the graph inside solve(), so the first query after a
+    // rebuild pays for the roadmap and later ones inherit it.
+    const bool first_query = !roadmap_seeded_;
+    const auto search_t0 = std::chrono::steady_clock::now();
+
+    if (rrt_->roadmap->solve(
+            ob::timedPlannerTerminationCondition(solve_time_seconds_))
+        == ob::PlannerStatus::EXACT_SOLUTION) {
+        solution = rrt_->pdef->getSolutionPath();
+    }
+
+    roadmap_seeded_ = true;
+
+    std::cout << "[runSearch] roadmap query "
+              << (first_query ? "(built from scratch): " : ": ")
+              << std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - search_t0).count()
+              << " ms, " << rrt_->roadmap->milestoneCount() << " milestones"
+              << std::endl;
+
+    // The roadmap can genuinely fail to connect a query it has no milestones
+    // near. Rather than spend the caller's time growing it, fall back to the
+    // search that never needed one.
+    if (!solution) {
+        std::cout << "[runSearch] roadmap query failed; falling back to RRT*"
+                  << std::endl;
+
+        rrt_->newQuery();
+        rrt_->planner->clear();
+        rrt_->planner->setProblemDefinition(rrt_->pdef);
+
+        if (rrt_->planner->solve(
+                ob::timedPlannerTerminationCondition(solve_time_seconds_))
+            == ob::PlannerStatus::EXACT_SOLUTION) {
+            solution = rrt_->pdef->getSolutionPath();
+        }
+    }
+
+    if (!solution) {
+        std::cout << "[runSearch] no exact solution" << std::endl;
         path.resize(0);
         return false;
     }
 
-    auto path_geom = std::dynamic_pointer_cast<og::PathGeometric>(rrt_->pdef->getSolutionPath());
+    auto path_geom = std::dynamic_pointer_cast<og::PathGeometric>(solution);
     if (!path_geom) {
         path.resize(0);
         return false;
@@ -453,7 +570,11 @@ bool JointSpacePlanner::runRRTStar(
     for (std::size_t i = 0; i < state_count; ++i) {
         const auto* rv = path_geom->getState(i)->as<ob::RealVectorStateSpace::StateType>();
         if (path[i].size() != nq_) path[i].resize(nq_);
-        for (int j = 0; j < nq_; ++j) path[i](j) = rv->values[j];
+        for (int j = 0; j < nq_; ++j) {
+            // Milestones were sampled against whatever the held joints were
+            // when they were created; the arm holds them where they are now.
+            path[i](j) = q_moves_[j] ? rv->values[j] : start_q(j);
+        }
     }
     path.resize(state_count);
     return true;
@@ -480,7 +601,8 @@ JointTrajectory JointSpacePlanner::timeParameterize(
     const std::vector<Eigen::VectorXd>& waypoints,
     double time_step,
     double max_joint_vel,
-    double max_joint_acc
+    double max_joint_acc,
+    const Eigen::VectorXd* start_velocity
 ) {
     JointTrajectory traj;
     traj.name = joint_names_;
@@ -548,10 +670,38 @@ JointTrajectory JointSpacePlanner::timeParameterize(
         sdot_back[k - 1] = std::min(std::sqrt(std::max(next, 0.0)), sdot_limit[k - 1]);
     }
 
+    // Where the arm already is on the path, in path-parameter terms: the
+    // measured velocity projected onto the path tangent. A velocity pointing
+    // away from the path projects negative and starts from rest, which is the
+    // right answer — there is nothing to hand over to.
+    double sdot_start = 0.0;
+    if (start_velocity != nullptr && start_velocity->size() == nq_) {
+        const double tangent_sq = dq_grid[0].squaredNorm();
+        if (tangent_sq > PATH_EPS) {
+            sdot_start = std::max(0.0, dq_grid[0].dot(*start_velocity) / tangent_sq);
+        }
+
+        const double feasible = std::min(sdot_limit[0], sdot_back[0]);
+        // Equality is the norm, not the exception: the arm is usually
+        // executing a time-optimal profile, so its speed sits exactly on the
+        // limit and rounding pushes it a hair over.
+        if (sdot_start > feasible * 1.01 + PATH_EPS) {
+            // Too fast to brake to rest along this path. Starting slower than
+            // the arm is actually moving is a step in the commanded velocity,
+            // so say so rather than hide it.
+            std::cout << "[timeParameterize] start speed clamped: "
+                      << sdot_start << " -> " << feasible
+                      << " (path units/s); the handover will not be smooth"
+                      << std::endl;
+        }
+
+        sdot_start = std::min(sdot_start, feasible);
+    }
+
     // Forward pass: accelerate as hard as the limits allow without exceeding
     // the backward profile.
     std::vector<double> sdot(N, 0.0);
-    sdot[0] = 0.0;
+    sdot[0] = sdot_start;
     for (int k = 0; k + 1 < N; ++k) {
         double sd = std::min(sdot[k], std::min(sdot_limit[k], sdot_back[k]));
         double lo = 0.0;
@@ -686,15 +836,10 @@ JointSpacePlanner::planPath(
 
     updateActiveJoints();
 
-    Eigen::VectorXd lower = model_.lowerPositionLimit;
-    Eigen::VectorXd upper = model_.upperPositionLimit;
     for (int i = 0; i < nq_; ++i) {
-        if (q_moves_[i]) continue;
-        goal_q_(i) = start_q_(i);
-        lower(i) = start_q_(i);
-        upper(i) = start_q_(i);
+        if (!q_moves_[i]) goal_q_(i) = start_q_(i);
     }
-    rrt_->setBounds(lower, upper);
+    ensureSearchSpace(start_q_);
 
     ik_handle_->set_active_joints(joint_moves_);
     const bool solved = runRRTStar(start_q_, goal_q_, waypoints_);
