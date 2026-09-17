@@ -1,6 +1,8 @@
 #include "core/arm_ik/robot_arm_ik.h"
 
 #include <pinocchio/autodiff/casadi.hpp>
+#include <pinocchio/algorithm/joint-configuration.hpp>
+#include <pinocchio/spatial/explog.hpp>
 #include <pinocchio/algorithm/rnea.hpp>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/collision/collision.hpp>
@@ -99,6 +101,18 @@ HumanoidIK::HumanoidIK(
 
     nq_ = model_.nq;
     nv_ = model_.nv;
+
+    constexpr double FIXED_JOINT_RANGE = 1e-3;
+    dls_dof_mask_ = Eigen::VectorXd::Ones(model_.nv);
+    for (int j = 1; j < model_.njoints; ++j) {
+        const int idx_q = model_.joints[j].idx_q();
+        const int idx_v = model_.joints[j].idx_v();
+        for (int k = 0; k < model_.joints[j].nv(); ++k) {
+            const double range = model_.upperPositionLimit(idx_q + k)
+                               - model_.lowerPositionLimit(idx_q + k);
+            if (range <= FIXED_JOINT_RANGE) dls_dof_mask_(idx_v + k) = 0.0;
+        }
+    }
 
     // Setup IK problem
     setup_optimization();
@@ -372,6 +386,87 @@ void HumanoidIK::reset() {
     init_data_ = Eigen::VectorXd::Zero(model_.nq);
 }
 
+Eigen::VectorXd HumanoidIK::solve_ik_dls(
+    const Eigen::Matrix4d& target,
+    const bool left
+) {
+    constexpr int MAX_ITERATIONS = 20;
+    constexpr double TOLERANCE = 1e-6;      // on the 6D error twist
+    constexpr double DAMPING = 1e-4;        // lambda^2
+    constexpr double MAX_STEP = 0.3;        // rad, per iteration
+    constexpr int MAX_BACKTRACKS = 6;
+
+    const auto frame_id = left ? L_hand_id_ : R_hand_id_;
+    const pinocchio::SE3 oMdes(target);
+
+    const auto twist_error = [&](const Eigen::VectorXd& q_test) {
+        pinocchio::framesForwardKinematics(model_, data_, q_test);
+        return pinocchio::log6(data_.oMf[frame_id].actInv(oMdes)).toVector().norm();
+    };
+
+    Eigen::VectorXd q = init_data_;
+    pinocchio::Data::Matrix6x J(6, model_.nv);
+    pinocchio::Data::Matrix6 Jlog;
+    Eigen::Matrix<double, 6, 6> JJt;
+    Eigen::Matrix<double, 6, 1> err;
+    Eigen::VectorXd dq(model_.nv);
+    Eigen::VectorXd q_try(model_.nq);
+
+    double err_norm = twist_error(q);
+
+    for (int iter = 0; iter < MAX_ITERATIONS && err_norm > TOLERANCE; ++iter) {
+
+        pinocchio::framesForwardKinematics(model_, data_, q);
+        const pinocchio::SE3 eMd = data_.oMf[frame_id].actInv(oMdes);
+        err = pinocchio::log6(eMd).toVector();
+
+        J.setZero();
+        pinocchio::computeFrameJacobian(model_, data_, q, frame_id,
+                                        pinocchio::LOCAL, J);
+        pinocchio::Jlog6(eMd.inverse(), Jlog);
+        J = (-Jlog * J).eval();
+        J = J * dls_dof_mask_.asDiagonal();
+
+        for (int j = 1; j < model_.njoints; ++j) {
+            const int idx_q = model_.joints[j].idx_q();
+            const int idx_v = model_.joints[j].idx_v();
+            for (int k = 0; k < model_.joints[j].nv(); ++k) {
+                const double slack_lo = q(idx_q + k) - model_.lowerPositionLimit(idx_q + k);
+                const double slack_hi = model_.upperPositionLimit(idx_q + k) - q(idx_q + k);
+                if (slack_lo <= 0.0 && slack_hi <= 0.0) J.col(idx_v + k).setZero();
+            }
+        }
+
+        JJt.noalias() = J * J.transpose();
+        JJt.diagonal().array() += DAMPING;
+        dq.noalias() = -J.transpose() * JJt.ldlt().solve(err);
+
+        const double dq_norm = dq.norm();
+        if (dq_norm > MAX_STEP) dq *= MAX_STEP / dq_norm;
+
+        bool improved = false;
+        double alpha = 1.0;
+        for (int bt = 0; bt < MAX_BACKTRACKS; ++bt) {
+            q_try = pinocchio::integrate(model_, q, alpha * dq);
+            q_try = q_try.cwiseMax(model_.lowerPositionLimit)
+                         .cwiseMin(model_.upperPositionLimit);
+
+            const double try_norm = twist_error(q_try);
+            if (try_norm < err_norm) {
+                q = q_try;
+                err_norm = try_norm;
+                improved = true;
+                break;
+            }
+            alpha *= 0.5;
+        }
+
+        if (!improved) break;
+    }
+
+    return q;
+}
+
 std::pair<double, double> HumanoidIK::compute_error(Eigen::Matrix4d A, Eigen::Matrix4d B){
     return {
         (A.block<3,1>(0,3) - B.block<3,1>(0,3)).norm(),
@@ -493,7 +588,8 @@ JointState HumanoidIK::solve_ik(
     const Eigen::VectorXd* EE_efrc,
     double* pos_err,
     double* rot_err,
-    bool* collision
+    bool* collision,
+    const bool use_dls
 )
 {
     // Update initial guess
@@ -505,6 +601,10 @@ JointState HumanoidIK::solve_ik(
         ) = jointstate_to_vectors(*current_state, model_);
         init_data_ = current_joint_pos_;
     }
+
+    if (use_dls) {
+        sol_q = solve_ik_dls(wrist, left);
+    } else {
 
     if (left){
         cd->opti_l_.set_initial(cd->l_var_q_, eigen_to_casadi(init_data_));
@@ -545,6 +645,8 @@ JointState HumanoidIK::solve_ik(
     }
 
     sol_q = Eigen::Map<Eigen::VectorXd>(sol_q_vec.data(), model_.nq);
+
+    } // !use_dls
 
     pinocchio::framesForwardKinematics(model_, data_, sol_q);
 

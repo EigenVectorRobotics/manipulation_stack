@@ -255,14 +255,16 @@ JointState Humanoid::solve_ik(
     const Eigen::VectorXd* EE_efrc,
     double* pos_err,
     double* rot_err,
-    bool* collision
+    bool* collision,
+    const bool use_dls
 ){
     return impl_->ik->solve_ik(
         wrist, left,
         current_state,
         EE_efrc,
         pos_err, rot_err,
-        collision
+        collision,
+        use_dls
     );
 }
 

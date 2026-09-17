@@ -109,10 +109,24 @@ class JointSpacePlanner {
 
         void updateActiveJoints();
 
+        JointState solveGoalConfig(
+            const Eigen::MatrixXd& pose,
+            const JointState& start_state,
+            const int refinement_passes
+        );
+
+        static bool poseNear(
+            const Eigen::Matrix4d& a,
+            const Eigen::Matrix4d& b,
+            const double pos_tol,
+            const double rot_tol
+        );
+
         JointState poseToJointConfig(
             const Eigen::MatrixXd& pose,
             const int refinement_passes = 5,
-            const JointState* reference_pose = nullptr
+            const JointState* reference_pose = nullptr,
+            const bool use_dls = false
         );
         Eigen::Matrix4d configToPose(const Eigen::VectorXd& q);
         std::vector<Eigen::MatrixXd> configsToPoses(
@@ -148,6 +162,11 @@ class JointSpacePlanner {
 
         std::vector<bool> joint_moves_;   // by pinocchio joint id
         std::vector<bool> q_moves_;       // by configuration index
+
+        JointState cached_goal_state_;
+        Eigen::Matrix4d cached_goal_pose_ = Eigen::Matrix4d::Identity();
+        bool cached_goal_valid_ = false;
+        bool cached_goal_left_ = false;
 };
 
 } // namespace HumanoidPilot

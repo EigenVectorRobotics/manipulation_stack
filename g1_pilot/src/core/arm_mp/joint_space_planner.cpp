@@ -35,6 +35,12 @@ constexpr int GRID_PER_WAYPOINT = 20;
 constexpr int MIN_GRID_POINTS = 200;
 constexpr double FIXED_JOINT_RANGE = 1e-3;
 
+constexpr double DLS_FALLBACK_POS_ERR = 1e-3;   // m
+constexpr double DLS_FALLBACK_ROT_ERR = 1e-2;   // rad
+
+constexpr double SEED_REUSE_POS = 0.15;   // m
+constexpr double SEED_REUSE_ROT = 0.5;    // rad
+
 /**
  * @brief Natural cubic spline through the waypoints, parameterised by
  * cumulative chord length in joint space.
@@ -318,7 +324,8 @@ JointSpacePlanner::~JointSpacePlanner() {}
 JointState JointSpacePlanner::poseToJointConfig(
     const Eigen::MatrixXd& pose,
     const int refinement_passes,
-    const JointState* reference_pose
+    const JointState* reference_pose,
+    const bool use_dls
 ) {
     if (pose.rows() != 4 || pose.cols() != 4) {
         throw std::invalid_argument("JointSpacePlanner: pose must be 4x4 SE(3)");
@@ -326,22 +333,75 @@ JointState JointSpacePlanner::poseToJointConfig(
 
     double pos_err = 0.0;
     double rot_err = 0.0;
-    JointState js = ik_handle_->solve_ik(
-        pose, left_arm_,
-        reference_pose, nullptr,
-        &pos_err, &rot_err
-    );
 
-    for (int pass = 1; pass < refinement_passes; ++pass) {
-        js = ik_handle_->solve_ik(
+    const auto solve = [&](const bool dls) {
+        JointState out = ik_handle_->solve_ik(
             pose, left_arm_,
-            nullptr, nullptr,
-            &pos_err, &rot_err
+            reference_pose, nullptr,
+            &pos_err, &rot_err,
+            nullptr, dls
         );
+
+        for (int pass = 1; pass < refinement_passes; ++pass) {
+            out = ik_handle_->solve_ik(
+                pose, left_arm_,
+                nullptr, nullptr,
+                &pos_err, &rot_err,
+                nullptr, dls
+            );
+        }
+        return out;
+    };
+
+    JointState js = solve(use_dls);
+
+    if (use_dls
+        && (pos_err > DLS_FALLBACK_POS_ERR || rot_err > DLS_FALLBACK_ROT_ERR)) {
+        std::cout << "[poseToJointConfig] DLS left pos err (m): " << pos_err
+                  << ", rot err (rad): " << rot_err
+                  << " — falling back to the optimisation solve" << std::endl;
+        js = solve(false);
     }
 
     std::cout << "[poseToJointConfig] IK pos err (m): " << pos_err
               << ", rot err (rad): " << rot_err << std::endl;
+
+    return js;
+}
+
+bool JointSpacePlanner::poseNear(
+    const Eigen::Matrix4d& a,
+    const Eigen::Matrix4d& b,
+    const double pos_tol,
+    const double rot_tol
+) {
+    if ((a.block<3,1>(0,3) - b.block<3,1>(0,3)).norm() > pos_tol) return false;
+
+    const Eigen::Matrix3d dR = a.block<3,3>(0,0).transpose() * b.block<3,3>(0,0);
+    return Eigen::AngleAxisd(dR).angle() <= rot_tol;
+}
+
+JointState JointSpacePlanner::solveGoalConfig(
+    const Eigen::MatrixXd& pose,
+    const JointState& start_state,
+    const int refinement_passes
+) {
+    const Eigen::Matrix4d pose4 = pose;
+
+    const bool reuse = cached_goal_valid_
+        && cached_goal_left_ == left_arm_
+        && poseNear(cached_goal_pose_, pose4, SEED_REUSE_POS, SEED_REUSE_ROT);
+
+    JointState js = reuse
+        ? poseToJointConfig(pose4, refinement_passes, &cached_goal_state_, true)
+        : poseToJointConfig(pose4, refinement_passes, &start_state, false);
+
+    if (js.position.size() != 0) {
+        cached_goal_state_ = js;
+        cached_goal_pose_ = pose4;
+        cached_goal_left_ = left_arm_;
+        cached_goal_valid_ = true;
+    }
 
     return js;
 }
@@ -573,7 +633,7 @@ JointSpacePlanner::planPath(
     const Eigen::MatrixXd& goal_pose
 ) {
     std::cout << "IK for goal pose:" << std::endl;
-    JointState goal_state = poseToJointConfig(goal_pose, 2, &start_state);
+    JointState goal_state = solveGoalConfig(goal_pose, start_state, 2);
     if (goal_state.position.size() == 0)
         return {};
 
@@ -670,7 +730,7 @@ JointSpacePlanner::planTrajectory(
     double max_joint_acc
 ){
     std::cout << "IK for goal pose:" << std::endl;
-    JointState goal_state = poseToJointConfig(goal_pose, 2, &start_state);
+    JointState goal_state = solveGoalConfig(goal_pose, start_state, 2);
     if (goal_state.position.size() == 0)
         return {};
 
