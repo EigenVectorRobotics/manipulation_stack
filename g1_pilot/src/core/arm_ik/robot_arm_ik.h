@@ -43,7 +43,8 @@ public:
         const Eigen::VectorXd* EE_efrc = nullptr,
         double* pos_err = nullptr,
         double* rot_err = nullptr,
-        bool* collision = nullptr
+        bool* collision = nullptr,
+        const bool use_dls = false
     );
 
     bool check_collision(const Eigen::VectorXd& q);
@@ -63,6 +64,11 @@ protected:
     );
 
     std::pair<double, double> compute_error(Eigen::Matrix4d, Eigen::Matrix4d);
+
+    Eigen::VectorXd solve_ik_dls(
+        const Eigen::Matrix4d& target,
+        const bool left
+    );
     pinocchio::Model model_;
     pinocchio::Data data_;
     pinocchio::GeometryModel geom_model_;
@@ -83,6 +89,8 @@ protected:
     pinocchio::FrameIndex oMLidar;
 
     Eigen::VectorXd init_data_;
+
+    Eigen::VectorXd dls_dof_mask_;
 
     Eigen::VectorXd sol_q;
     Eigen::VectorXd sol_v;

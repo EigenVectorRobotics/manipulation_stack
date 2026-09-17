@@ -98,7 +98,7 @@ void VisualServoPlanner::appendFinalLeg(
         Eigen::Matrix4d T_abs = goal_pose * final_leg_[i];
         const int passes =
             (i + 1 == final_leg_.size()) ? GOAL_REFINEMENT_PASSES : 1;
-        JointState js = poseToJointConfig(T_abs, passes, have_seed ? &seed : nullptr);
+        JointState js = poseToJointConfig(T_abs, passes, have_seed ? &seed : nullptr, true);
         if (js.position.size() == 0) {
             std::cout << "[VisualServoPlanner] final-leg IK failed; truncating" << std::endl;
             break;
@@ -159,7 +159,7 @@ VisualServoPlanner::planTrajectory(
 
     // Phase 1: RRT* to the intermediate pose. Call the base planPath explicitly
     // so we don't recurse into our own override.
-    JointState intermediate_state = poseToJointConfig(intermediate_mat, 2, &start_state);
+    JointState intermediate_state = solveGoalConfig(intermediate_mat, start_state, 2);
     if (intermediate_state.position.size() == 0) return {};
 
     (void) JointSpacePlanner::planPath(start_state, intermediate_state);

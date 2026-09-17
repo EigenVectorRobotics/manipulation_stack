@@ -84,7 +84,8 @@ public:
         const Eigen::VectorXd* EE_efrc = nullptr,
         double* pos_err = nullptr,
         double* rot_err = nullptr,
-        bool* collision = nullptr
+        bool* collision = nullptr,
+        const bool use_dls = false
     );
 
     bool check_collision(const Eigen::VectorXd& q);
