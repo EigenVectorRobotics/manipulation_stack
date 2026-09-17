@@ -157,6 +157,15 @@ public:
         double max_joint_acc = 2.0
     );
 
+    JointTrajectory
+    replanTrajectory(
+        const JointState& start_state,
+        const Eigen::MatrixXd& goal_pose,
+        double time_step = 0.01,
+        double max_joint_vel = 1.0,
+        double max_joint_acc = 2.0
+    );
+
     Eigen::MatrixXd forward_kinematics(
         const Eigen::VectorXd& q,
         const bool left = false
