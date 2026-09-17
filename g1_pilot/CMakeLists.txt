@@ -143,6 +143,7 @@ if(ROS2_DEFAULT)
         tf2_ros
         tf2_eigen
         tf2_geometry_msgs
+        std_srvs
         humanoid_manipulation_interfaces
     )
 
@@ -161,6 +162,7 @@ if(ROS2_DEFAULT)
 
     # Action Servers
     add_executable(joint_controller src/joint_controller.cpp)
+    add_executable(move_to_pose src/move_to_pose.cpp)
 
     target_link_libraries(ik_joint_state_publisher g1_pilot)
     ament_target_dependencies(ik_joint_state_publisher ${ROS2_DEPS})
@@ -183,6 +185,9 @@ if(ROS2_DEFAULT)
     target_link_libraries(plan_trajecory g1_pilot)
     ament_target_dependencies(plan_trajecory ${ROS2_DEPS})
 
+    target_link_libraries(move_to_pose g1_pilot)
+    ament_target_dependencies(move_to_pose ${ROS2_DEPS})
+
     install(TARGETS
         ik_joint_state_publisher
         impede_arms
@@ -191,6 +196,7 @@ if(ROS2_DEFAULT)
         grav_ff
         plan_trajecory
         joint_controller
+        move_to_pose
         DESTINATION lib/${PROJECT_NAME}
     )
 

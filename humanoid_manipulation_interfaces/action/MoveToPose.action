@@ -1,0 +1,18 @@
+# Goal - plan to this pose and track the resulting trajectory
+geometry_msgs/PoseStamped target_pose
+bool left_arm
+# Optional topic publishing updated target poses as the goal moves, for a
+# target that is being tracked rather than fixed. Empty means a static target.
+# Poses arriving here are currently stored only: nothing replans off them yet.
+string target_topic
+---
+# Result
+bool success
+float64 final_error
+string message
+---
+# Feedback
+bool tracking            # false while planning, true once the trajectory is being tracked
+float64 current_error
+uint32 waypoints_remaining
+uint32 total_waypoints

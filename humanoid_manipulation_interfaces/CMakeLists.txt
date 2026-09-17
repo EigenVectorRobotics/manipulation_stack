@@ -8,6 +8,7 @@ find_package(trajectory_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ControlJointTrajectory.action"
+  "action/MoveToPose.action"
   "action/VisualServoingArm.action"
   "srv/PlanJointTrajectory.srv"
   DEPENDENCIES geometry_msgs trajectory_msgs
