@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <string>
 
 
@@ -29,6 +30,7 @@ int main(){
             if (names[i] == "left_shoulder_pitch_joint") start.position[i] = 0.55;
             if (names[i] == "left_shoulder_roll_joint")  start.position[i] = 0.45;
             if (names[i] == "left_elbow_joint")          start.position[i] = 1.30;
+            if (names[i] == "right_shoulder_roll_joint") start.position[i] = -0.01;
             if (names[i] == "right_elbow_joint")         start.position[i] = 1.10;
         }
 
@@ -87,9 +89,81 @@ int main(){
         }
 
         Eigen::VectorXd q(n_joints);
+        Eigen::Vector3d pregrasp = target.block<3,1>(0,3);
+        pregrasp.x() -= 0.05;
+        double closest_stop_to_pregrasp = std::numeric_limits<double>::infinity();
+        double goal_error = std::numeric_limits<double>::infinity();
+        std::size_t rest_run = 0;
+        std::size_t longest_rest_run = 0;
         for (std::size_t k = 0; k < n_samples; ++k) {
             for (std::size_t j = 0; j < n_joints; ++j) q(j) = traj.position[j][k];
-            std::cout << handle.forward_kinematics(q).block<3,1>(0,3).transpose() << std::endl;
+            const Eigen::Vector3d ee = handle.forward_kinematics(q).block<3,1>(0,3);
+            std::cout << ee.transpose() << std::endl;
+            if (k == n_samples - 1) goal_error = (ee - target.block<3,1>(0,3)).norm();
+            if (k == 0 || k == n_samples - 1) continue;
+
+            double joint_speed = 0.0;
+            for (std::size_t j = 0; j < n_joints; ++j) {
+                joint_speed = std::max(joint_speed, std::abs(traj.velocity[j][k]));
+            }
+            if (joint_speed < 1e-5) {
+                closest_stop_to_pregrasp = std::min(
+                    closest_stop_to_pregrasp, (ee - pregrasp).norm());
+            }
+            if (joint_speed < 1e-5 && (ee - pregrasp).norm() < 0.02) {
+                longest_rest_run = std::max(longest_rest_run, ++rest_run);
+            } else {
+                rest_run = 0;
+            }
+        }
+        const std::size_t required_rest_samples =
+            static_cast<std::size_t>(std::ceil(1.0 / traj.time_step)) + 1;
+        if (closest_stop_to_pregrasp > 0.02 || goal_error > 0.02 ||
+            longest_rest_run < required_rest_samples) {
+            std::cerr << "FAIL: trajectory did not hold at pre-grasp and reach the goal"
+                      << " (stop error " << closest_stop_to_pregrasp
+                      << " m, rest samples " << longest_rest_run
+                      << ", goal error " << goal_error << " m)" << std::endl;
+            return -1;
+        }
+
+        Eigen::MatrixXd shifted_target = target;
+        shifted_target(1, 3) += 0.005;
+        const JointTrajectory replanned = handle.replanTrajectory(start, shifted_target);
+        if (replanned.position.size() != n_joints ||
+            replanned.position.front().size() < 3) {
+            std::cerr << "FAIL: cached replan produced no trajectory" << std::endl;
+            return -1;
+        }
+
+        pregrasp.y() += 0.005;
+        double replan_stop_error = std::numeric_limits<double>::infinity();
+        rest_run = 0;
+        longest_rest_run = 0;
+        const std::size_t replan_samples = replanned.position.front().size();
+        for (std::size_t k = 1; k + 1 < replan_samples; ++k) {
+            double joint_speed = 0.0;
+            for (std::size_t j = 0; j < n_joints; ++j) {
+                q(j) = replanned.position[j][k];
+                joint_speed = std::max(
+                    joint_speed, std::abs(replanned.velocity[j][k]));
+            }
+            if (joint_speed < 1e-5) {
+                const Eigen::Vector3d ee =
+                    handle.forward_kinematics(q).block<3,1>(0,3);
+                replan_stop_error = std::min(replan_stop_error, (ee - pregrasp).norm());
+                if ((ee - pregrasp).norm() < 0.02) {
+                    longest_rest_run = std::max(longest_rest_run, ++rest_run);
+                    continue;
+                }
+            }
+            rest_run = 0;
+        }
+        if (replan_stop_error > 0.02 || longest_rest_run < required_rest_samples) {
+            std::cerr << "FAIL: cached replan did not hold at pre-grasp"
+                      << " (error " << replan_stop_error << " m, rest samples "
+                      << longest_rest_run << ")" << std::endl;
+            return -1;
         }
 
         std::cout << "PASS" << std::endl;

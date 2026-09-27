@@ -100,10 +100,7 @@ public:
         declare_parameter<double>("max_joint_vel", 1.0);
         declare_parameter<double>("max_joint_acc", 2.0);
         declare_parameter<double>("tf_timeout", 0.5);
-        // How far the tracked target must move before it is worth replanning.
-        // Matched to REPLAN_LOCAL_POS/ROT in visual_servo_planner.cpp, the
-        // window inside which replanTrajectory can reuse its cached search.
-        declare_parameter<double>("replan_position_delta", 0.01);
+        declare_parameter<double>("replan_position_delta", 0.005);
         declare_parameter<double>("replan_orientation_delta", 0.05);
         declare_parameter<double>("replan_min_interval", 0.25);
 
