@@ -2,14 +2,12 @@
 #include "core/interfaces.h"
 
 #include <algorithm>
-#include <chrono>
 #include <limits>
 #include <cmath>
-#include <iomanip>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
 #include <tuple>
+#include <utility>
 
 namespace HumanoidPilot{
 
@@ -37,19 +35,37 @@ constexpr double REPLAN_PATH_DRIFT = 0.25;  // rad, over the whole configuration
 constexpr double REJOIN_EPS = 1e-4;         // rad
 
 constexpr double PATH_SEGMENT_EPS = 1e-12;
+constexpr double PREGRASP_DELAY = 1.0;
 
-double elapsedMs(const std::chrono::steady_clock::time_point& start) {
-    return std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - start).count();
-}
+JointTrajectory concatenateTrajectories(
+    JointTrajectory first,
+    const JointTrajectory& second,
+    double delay = 0.0
+) {
+    if (!std::isfinite(delay) || delay < 0.0 ||
+        (delay > 0.0 &&
+         (!std::isfinite(first.time_step) || first.time_step <= 0.0))) {
+        throw std::invalid_argument("trajectory delay must be nonnegative with a positive time step");
+    }
+    const std::size_t delay_samples = delay > 0.0
+        ? static_cast<std::size_t>(std::ceil(delay / first.time_step)) : 0;
 
-// Timing lines are built on their own stream: whatever formatting the caller
-// left on std::cout would otherwise turn millisecond counts into scientific
-// notation.
-std::ostringstream timingLine() {
-    std::ostringstream out;
-    out << std::fixed << std::setprecision(2);
-    return out;
+    for (std::size_t j = 0; j < first.name.size(); ++j) {
+        first.position[j].insert(
+            first.position[j].end(), delay_samples, second.position[j].front());
+        first.velocity[j].insert(first.velocity[j].end(), delay_samples, 0.0);
+        first.acceleration[j].insert(first.acceleration[j].end(), delay_samples, 0.0);
+        first.position[j].insert(
+            first.position[j].end(), second.position[j].begin() + 1,
+            second.position[j].end());
+        first.velocity[j].insert(
+            first.velocity[j].end(), second.velocity[j].begin() + 1,
+            second.velocity[j].end());
+        first.acceleration[j].insert(
+            first.acceleration[j].end(), second.acceleration[j].begin() + 1,
+            second.acceleration[j].end());
+    }
+    return first;
 }
 
 } // namespace
@@ -182,59 +198,39 @@ VisualServoPlanner::planTrajectory(
     double max_joint_vel,
     double max_joint_acc
 ) {
-    const auto plan_t0 = std::chrono::steady_clock::now();
-
     Eigen::Matrix4d T_start = startPose(start_state);
 
     double pos_dist = (goal_pose.block<3,1>(0,3) - T_start.block<3,1>(0,3)).norm();
 
     if (pos_dist < DIRECT_APPROACH_DISTANCE) {
-        JointTrajectory direct = JointSpacePlanner::planTrajectory(
+        return JointSpacePlanner::planTrajectory(
             start_state, goal_pose, time_step, max_joint_vel, max_joint_acc);
-        auto msg = timingLine();
-        msg << "[planTrajectory] direct, no approach leg: "
-            << elapsedMs(plan_t0) << " ms";
-        std::cout << msg.str() << std::endl;
-        return direct;
     }
 
     Eigen::MatrixXd intermediate_mat = goal_pose * intermediate_pose_offset_;
 
-    // Phase 1: RRT* to the intermediate pose. Call the base planPath explicitly
-    // so we don't recurse into our own override.
     JointState intermediate_state = solveGoalConfig(intermediate_mat, start_state, 2);
     if (intermediate_state.position.size() == 0) return {};
-
-    const double ik_ms = elapsedMs(plan_t0);
 
     (void) JointSpacePlanner::planPath(start_state, intermediate_state);
     if (waypoints_.empty()) return {};
 
-    // Phase 2 is appended as extra waypoints so both phases share a single
-    // time parameterisation instead of meeting at a discontinuity.
-    std::vector<Eigen::VectorXd> joints = waypoints_;
+    std::vector<Eigen::VectorXd> forward_path{waypoints_.back()};
+    appendFinalLeg(goal_pose, forward_path);
+    if (forward_path.size() != final_leg_.size() + 1) return {};
 
-    const double search_ms = elapsedMs(plan_t0);
+    JointTrajectory search_traj = timeParameterize(
+        waypoints_, time_step, max_joint_vel, max_joint_acc);
+    JointTrajectory forward_traj = timeParameterize(
+        forward_path, time_step, max_joint_vel/2, max_joint_acc/4);
+    JointTrajectory traj = concatenateTrajectories(
+        std::move(search_traj), forward_traj, PREGRASP_DELAY);
 
     last_search_ = waypoints_;
     last_goal_pose_ = goal_pose;
-    last_start_q_ = joints.front();
+    last_start_q_ = waypoints_.front();
     last_plan_left_ = left_arm_;
     last_plan_valid_ = true;
-
-    appendFinalLeg(goal_pose, joints);
-
-    const double leg_ms = elapsedMs(plan_t0) - search_ms;
-
-    JointTrajectory traj =
-        timeParameterize(joints, time_step, max_joint_vel, max_joint_acc);
-
-    auto msg = timingLine();
-    msg << "[planTrajectory] full plan: " << elapsedMs(plan_t0)
-        << " ms (goal IK " << ik_ms
-        << " ms, RRT* " << (search_ms - ik_ms)
-        << " ms, approach leg " << leg_ms << " ms)";
-    std::cout << msg.str() << std::endl;
 
     return traj;
 }
@@ -247,12 +243,8 @@ VisualServoPlanner::replanTrajectory(
     double max_joint_vel,
     double max_joint_acc
 ) {
-    const auto replan_t0 = std::chrono::steady_clock::now();
     const Eigen::Matrix4d goal4 = goal_pose;
 
-    // Why the previous search could not be reused; null means it could. Kept
-    // alongside the measured drifts so the thresholds can be tuned against
-    // what actually happens on the robot.
     const char* reason = nullptr;
     double goal_drift = 0.0;
     double start_drift = 0.0;
@@ -281,10 +273,6 @@ VisualServoPlanner::replanTrajectory(
             if (last_start_q_.size() != start_q.size()) {
                 reason = "configuration size changed";
             } else {
-                // The arm is somewhere along the path it is executing, which
-                // after shortcutting may be only two waypoints long — so the
-                // distance that matters is to the nearest point on a segment,
-                // not to the nearest waypoint.
                 start_drift = (start_q - last_search_.front()).norm();
                 rejoin_index = 0;
 
@@ -327,46 +315,39 @@ VisualServoPlanner::replanTrajectory(
         JointTrajectory traj = planTrajectory(
             start_state, goal_pose, time_step, max_joint_vel, max_joint_acc);
 
-        auto msg = timingLine();
-        msg << "[replanTrajectory] NOT tier 0 (" << reason << "): "
-            << elapsedMs(replan_t0) << " ms  [goal drift "
-            << std::setprecision(4) << goal_drift << " m / limit "
-            << REPLAN_LOCAL_POS << ", arm drift " << start_drift
-            << " rad / limit " << REPLAN_PATH_DRIFT << "]";
-        std::cout << msg.str() << std::endl;
+        std::cout << "[replanTrajectory] NOT tier 0 (" << reason
+                  << ") [goal drift " << goal_drift << " m / limit "
+                  << REPLAN_LOCAL_POS << ", arm drift " << start_drift
+                  << " rad / limit " << REPLAN_PATH_DRIFT << "]" << std::endl;
         return traj;
     }
 
-    // Everything from where the arm is to the end of the cached search. The
-    // measured configuration is prepended only when the arm has actually
-    // drifted off a waypoint, so an unmoved arm does not get a zero-length
-    // first segment.
-    const auto leg_t0 = std::chrono::steady_clock::now();
-
     std::vector<Eigen::VectorXd> joints;
-    joints.reserve(last_search_.size() - rejoin_index + final_leg_.size() + 1);
+    joints.reserve(last_search_.size() - rejoin_index + 1);
     if (start_drift > REJOIN_EPS) joints.push_back(rejoin_q);
     for (std::size_t i = rejoin_index; i < last_search_.size(); ++i) {
         joints.push_back(last_search_[i]);
     }
 
     const std::size_t reused = joints.size();
+    if (joints.empty()) return {};
 
-    appendFinalLeg(goal4, joints);
+    std::vector<Eigen::VectorXd> forward_path{joints.back()};
+    appendFinalLeg(goal4, forward_path);
+    if (forward_path.size() != final_leg_.size() + 1) return {};
 
-    const double leg_ms = elapsedMs(leg_t0);
-
-    JointTrajectory traj = timeParameterize(
+    JointTrajectory search_traj = timeParameterize(
         joints, time_step, max_joint_vel, max_joint_acc, &start_vel);
+    JointTrajectory forward_traj = timeParameterize(
+        forward_path, time_step, max_joint_vel, max_joint_acc);
+    JointTrajectory traj = concatenateTrajectories(
+        std::move(search_traj), forward_traj, PREGRASP_DELAY);
 
-    auto msg = timingLine();
-    msg << "[replanTrajectory] tier 0, search reused: "
-        << elapsedMs(replan_t0) << " ms (approach leg " << leg_ms
-        << " ms)  [goal drift " << std::setprecision(4) << goal_drift
-        << " m, off path " << start_drift << " rad, rejoined "
-        << rejoin_index << "/" << last_search_.size() << ", " << reused
-        << " waypoints reused]";
-    std::cout << msg.str() << std::endl;
+    std::cout << "[replanTrajectory] tier 0, search reused"
+              << " [goal drift " << goal_drift
+              << " m, off path " << start_drift << " rad, rejoined "
+              << rejoin_index << "/" << last_search_.size() << ", " << reused
+              << " waypoints reused]" << std::endl;
 
     return traj;
 }
