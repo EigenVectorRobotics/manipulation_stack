@@ -508,7 +508,7 @@ private:
                 break;
         }
 
-        path_pub_->publish(convertToPath(ee_path, "pelvis", get_clock()->now()));
+        publish_path_(ee_path);
         RCLCPP_INFO(get_logger(), "Tracking trajectory");
         monitor_(goal);
     }
@@ -536,7 +536,7 @@ private:
         }
 
         const Eigen::MatrixXd target = to_pelvis_frame_(update);
-        if (target.size() == 0) return;     // to_pelvis_frame_ already logged
+        if (target.size() == 0) return;
 
         {
             std::lock_guard<std::mutex> lock(ctrl_mutex_);
@@ -592,7 +592,7 @@ private:
         // the monitor's next pass terminate the goal.
         if (install_(goal, traj, target) != Install::Ok) return;
 
-        path_pub_->publish(convertToPath(ee_path, "pelvis", get_clock()->now()));
+        publish_path_(ee_path);
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
                              "Replanned to [%.3f %.3f %.3f], %zu waypoints",
                              target(0, 3), target(1, 3), target(2, 3),
@@ -698,23 +698,6 @@ private:
         cv_.notify_all();   // wakes the cancel service waiting on this goal
     }
 
-    Eigen::MatrixXd to_planning_frame_(const geometry_msgs::msg::PoseStamped & pose)
-    {
-        try {
-            auto stamped = pose;
-            stamped.header.stamp = rclcpp::Time(0);
-            const auto out = tf_buffer_->transform(
-                stamped, frame_,
-                tf2::durationFromSec(get_parameter("tf_timeout").as_double()));
-            Eigen::Isometry3d transformed;
-            tf2::fromMsg(out.pose, transformed);
-            return transformed.matrix();
-        } catch (const tf2::TransformException & ex) {
-            RCLCPP_ERROR(get_logger(), "TF lookup failed: %s", ex.what());
-            return Eigen::MatrixXd();
-        }
-    }
-
     Eigen::MatrixXd to_pelvis_frame_(const geometry_msgs::msg::PoseStamped & pose)
     {
         try {
@@ -732,12 +715,35 @@ private:
         }
     }
 
-    
+    Eigen::MatrixXd pelvis_to_planning_frame_()
+    {
+        if (frame_ == "pelvis") return Eigen::Matrix4d::Identity();
+        try {
+            const auto transform = tf_buffer_->lookupTransform(
+                frame_, "pelvis", tf2::TimePointZero);
+            return tf2::transformToEigen(transform).matrix();
+        } catch (const tf2::TransformException & ex) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                                 "TF lookup failed: %s", ex.what());
+            return Eigen::MatrixXd();
+        }
+    }
+
+    void publish_path_(const std::vector<Eigen::MatrixXd> & pelvis_path)
+    {
+        const Eigen::MatrixXd transform = pelvis_to_planning_frame_();
+        if (transform.size() == 0) return;
+        std::vector<Eigen::MatrixXd> path;
+        path.reserve(pelvis_path.size());
+        for (const auto & pose : pelvis_path) path.push_back(transform * pose);
+        path_pub_->publish(convertToPath(path, frame_, get_clock()->now()));
+    }
 
     // ══════════════════ Control loop ══════════════════
 
     void control_tick_()
     {
+        const Eigen::MatrixXd transform = pelvis_to_planning_frame_();
         /* A tracking loop that quietly stops running is the worst failure this
          * node has, so it reports its own overruns. */
         const auto tick = std::chrono::steady_clock::now();
@@ -755,10 +761,14 @@ private:
         if (state_.name.empty()) return;
 
         controller_model_->update(state_);
-        left_ee_pub_->publish(convertToPoseStamped(
-            controller_model_->get_current_left_ee_pose(), frame_, get_clock()->now()));
-        right_ee_pub_->publish(convertToPoseStamped(
-            controller_model_->get_current_right_ee_pose(), frame_, get_clock()->now()));
+        if (transform.size() != 0) {
+            left_ee_pub_->publish(convertToPoseStamped(
+                transform * controller_model_->get_current_left_ee_pose(),
+                frame_, get_clock()->now()));
+            right_ee_pub_->publish(convertToPoseStamped(
+                transform * controller_model_->get_current_right_ee_pose(),
+                frame_, get_clock()->now()));
+        }
 
         // No trajectory means no commands. This is what cancelling relies on.
         if (traj_points_.empty() || idx_ >= traj_points_.size()) return;

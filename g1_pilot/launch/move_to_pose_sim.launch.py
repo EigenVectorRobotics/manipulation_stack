@@ -73,6 +73,8 @@ def generate_launch_description():
         DeclareLaunchArgument('orientation', default_value='[1.0, 0.0, 0.0, 0.0]',
                               description='Target orientation [qw, qx, qy, qz]'),
         DeclareLaunchArgument('target_frame', default_value='pelvis'),
+        DeclareLaunchArgument('planning_frame',
+                              default_value='left_ankle_roll_link'),
         DeclareLaunchArgument('left_arm', default_value='false'),
         DeclareLaunchArgument('target_topic', default_value='',
                               description='Topic publishing updated target '
@@ -100,6 +102,9 @@ def generate_launch_description():
         executable='move_to_pose',
         name='move_to_pose_server',
         output='screen',
+        parameters=[{
+            'planning_frame': LaunchConfiguration('planning_frame'),
+        }]
     )
 
     return LaunchDescription(args + [sim, display, move_to_pose,

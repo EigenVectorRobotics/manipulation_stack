@@ -64,6 +64,7 @@ def generate_launch_description():
             'left_ee_pose_topic': LaunchConfiguration('left_ee_pose_topic'),
             'right_ee_pose_topic': LaunchConfiguration('right_ee_pose_topic'),
             'traj_topic': LaunchConfiguration('traj_topic'),
+            'planning_frame': LaunchConfiguration('target_frame_arm'),
         }.items(),
     )
 
