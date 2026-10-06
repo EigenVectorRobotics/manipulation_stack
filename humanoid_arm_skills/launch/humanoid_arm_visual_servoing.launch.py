@@ -13,7 +13,7 @@ def generate_launch_description():
         DeclareLaunchArgument('normal_pose_topic',
                               default_value='track_3d/selected_normal_pose'),
         DeclareLaunchArgument('target_frame_arm',
-                              default_value='pelvis',
+                              default_value='left_ankle_roll_link',
                               description='TF frame to transform normal pose into'),
         DeclareLaunchArgument('filter_window_size', default_value='10'),
 

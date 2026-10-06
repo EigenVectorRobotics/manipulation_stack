@@ -451,7 +451,7 @@ private:
             return;
         }
 
-        const Eigen::MatrixXd target = to_planning_frame_(request->target_pose);
+        const Eigen::MatrixXd target = to_pelvis_frame_(request->target_pose);
         if (target.size() == 0) {
             finish_(goal, false, 0.0, "Target pose transform failed");
             return;
@@ -508,7 +508,7 @@ private:
                 break;
         }
 
-        path_pub_->publish(convertToPath(ee_path, frame_, get_clock()->now()));
+        path_pub_->publish(convertToPath(ee_path, "pelvis", get_clock()->now()));
         RCLCPP_INFO(get_logger(), "Tracking trajectory");
         monitor_(goal);
     }
@@ -535,8 +535,8 @@ private:
             if (since < get_parameter("replan_min_interval").as_double()) return;
         }
 
-        const Eigen::MatrixXd target = to_planning_frame_(update);
-        if (target.size() == 0) return;     // to_planning_frame_ already logged
+        const Eigen::MatrixXd target = to_pelvis_frame_(update);
+        if (target.size() == 0) return;     // to_pelvis_frame_ already logged
 
         {
             std::lock_guard<std::mutex> lock(ctrl_mutex_);
@@ -592,7 +592,7 @@ private:
         // the monitor's next pass terminate the goal.
         if (install_(goal, traj, target) != Install::Ok) return;
 
-        path_pub_->publish(convertToPath(ee_path, frame_, get_clock()->now()));
+        path_pub_->publish(convertToPath(ee_path, "pelvis", get_clock()->now()));
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
                              "Replanned to [%.3f %.3f %.3f], %zu waypoints",
                              target(0, 3), target(1, 3), target(2, 3),
@@ -714,6 +714,25 @@ private:
             return Eigen::MatrixXd();
         }
     }
+
+    Eigen::MatrixXd to_pelvis_frame_(const geometry_msgs::msg::PoseStamped & pose)
+    {
+        try {
+            auto stamped = pose;
+            stamped.header.stamp = rclcpp::Time(0);
+            const auto out = tf_buffer_->transform(
+                stamped, "pelvis",
+                tf2::durationFromSec(get_parameter("tf_timeout").as_double()));
+            Eigen::Isometry3d transformed;
+            tf2::fromMsg(out.pose, transformed);
+            return transformed.matrix();
+        } catch (const tf2::TransformException & ex) {
+            RCLCPP_ERROR(get_logger(), "TF lookup failed: %s", ex.what());
+            return Eigen::MatrixXd();
+        }
+    }
+
+    
 
     // ══════════════════ Control loop ══════════════════
 
