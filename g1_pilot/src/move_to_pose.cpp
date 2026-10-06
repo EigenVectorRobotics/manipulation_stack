@@ -737,9 +737,9 @@ private:
 
         controller_model_->update(state_);
         left_ee_pub_->publish(convertToPoseStamped(
-            controller_model_->get_current_left_ee_pose(), frame_, get_clock()->now()));
+            controller_model_->get_current_left_ee_pose(), "pelvis", get_clock()->now()));
         right_ee_pub_->publish(convertToPoseStamped(
-            controller_model_->get_current_right_ee_pose(), frame_, get_clock()->now()));
+            controller_model_->get_current_right_ee_pose(), "pelvis", get_clock()->now()));
 
         // No trajectory means no commands. This is what cancelling relies on.
         if (traj_points_.empty() || idx_ >= traj_points_.size()) return;
