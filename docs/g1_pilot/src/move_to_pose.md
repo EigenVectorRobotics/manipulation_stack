@@ -26,3 +26,7 @@ A newer goal preempts the active goal while control continues during planning. C
 ## Frames
 
 Goal poses transform into pelvis coordinates for the core; published paths and end-effector poses use `planning_frame`. Target conversion retains the existing latest-TF behavior.
+
+## Target offset
+
+`arm_safety_distance_{x,y,z}` defaults to zero metres and translates each target along its local axes. Shared target conversion applies it once to the initial action pose and every streamed update before drift checks and planning.

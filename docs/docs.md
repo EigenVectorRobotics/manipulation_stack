@@ -528,9 +528,10 @@ The skill sends one `MoveToPose` goal and streams filtered target poses to its `
 | `goal_rate` | 2.0 Hz | Main loop rate. |
 | `action_timeout` | 600 s | Per-goal timeout. |
 | `post_goal_cooldown` | 1.0 s | Cooldown after a successful goal. |
-| `arm_safety_distance_{x,y,z}` | (-0.01, 0.0, 0.0) m | Local-frame offset applied to the target before planning. |
 
 The skill uses a `ReentrantCallbackGroup` for callbacks and a motion lock for goal state. `move_to_pose` owns trajectory replanning.
+
+`move_to_pose` owns `arm_safety_distance_{x,y,z}` (default zero, metres) and applies the offset along each target pose's local axes before planning or replanning. The visual-servo launch forwards these arguments to the motion server; the skill passes target poses unchanged.
 
 ### `pose_filtering`
 

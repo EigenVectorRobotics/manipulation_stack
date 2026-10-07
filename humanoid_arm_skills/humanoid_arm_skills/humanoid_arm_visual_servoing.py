@@ -11,8 +11,6 @@ The move_to_pose server replans while the goal runs.
 import time
 import threading
 
-import numpy as np
-
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer, ActionClient, GoalResponse, CancelResponse
@@ -63,9 +61,6 @@ class VisualServoArmNode(Node):
         self.declare_parameter('goal_rate', 2.0)
         self.declare_parameter('action_timeout', 600.0)
         self.declare_parameter('post_goal_cooldown', 1.0)
-        self.declare_parameter('arm_safety_distance_x', -0.01)
-        self.declare_parameter('arm_safety_distance_y', 0.0)
-        self.declare_parameter('arm_safety_distance_z', 0.03)
 
         # ── Persistent state ──
         self.last_pose_time = None
@@ -425,24 +420,6 @@ class VisualServoArmNode(Node):
     # ── Subscriber callbacks ──
 
     def _filtered_pose_cb(self, msg: PoseStamped):
-        # Apply offset in the pose's local frame (along its local x-axis)
-        q = msg.pose.orientation
-        x, y, z, w = q.x, q.y, q.z, q.w
-        rot = np.array([
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
-            [2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)],
-            [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)],
-        ])
-        offset_local = np.array([
-            self.get_parameter('arm_safety_distance_x').value,
-            self.get_parameter('arm_safety_distance_y').value,
-            self.get_parameter('arm_safety_distance_z').value,
-        ])
-        offset_world = rot @ offset_local
-        msg.pose.position.x += float(offset_world[0])
-        msg.pose.position.y += float(offset_world[1])
-        msg.pose.position.z += float(offset_world[2])
-
         self.last_pose_time = self.get_clock().now().nanoseconds
         self.last_goal = msg
 

@@ -20,6 +20,8 @@ def generate_launch_description():
     ld.add_action(DeclareLaunchArgument('traj_topic', default_value='traj'))
     ld.add_action(DeclareLaunchArgument('planning_frame',
                                         default_value='left_ankle_roll_link'))
+    for axis in 'xyz':
+        ld.add_action(DeclareLaunchArgument(f'arm_safety_distance_{axis}', default_value='0.0'))
 
     ld.add_action(Node(
         package='g1_pilot',
@@ -35,6 +37,8 @@ def generate_launch_description():
             'right_ee_pose_topic': LaunchConfiguration('right_ee_pose_topic'),
             'traj_topic': LaunchConfiguration('traj_topic'),
             'planning_frame': LaunchConfiguration('planning_frame'),
+            **{f'arm_safety_distance_{axis}': LaunchConfiguration(f'arm_safety_distance_{axis}')
+               for axis in 'xyz'},
         }],
     ))
     return ld

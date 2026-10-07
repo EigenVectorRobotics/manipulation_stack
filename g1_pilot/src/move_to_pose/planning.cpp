@@ -201,6 +201,10 @@ Eigen::MatrixXd MoveToPoseServer::to_pelvis_frame_(const PoseStamped & pose)
             tf2::durationFromSec(get_parameter("tf_timeout").as_double()));
         Eigen::Isometry3d transformed;
         tf2::fromMsg(out.pose, transformed);
+        transformed.translate(Eigen::Vector3d(
+            get_parameter("arm_safety_distance_x").as_double(),
+            get_parameter("arm_safety_distance_y").as_double(),
+            get_parameter("arm_safety_distance_z").as_double()));
         return transformed.matrix();
     } catch (const tf2::TransformException & ex) {
         RCLCPP_ERROR(get_logger(), "TF lookup failed: %s", ex.what());

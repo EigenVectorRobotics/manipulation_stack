@@ -81,6 +81,8 @@ def generate_launch_description():
         DeclareLaunchArgument('goal_delay', default_value='8.0',
                               description='Seconds to wait before sending the goal'),
     ]
+    args.extend(DeclareLaunchArgument(f'arm_safety_distance_{axis}', default_value='0.0')
+                for axis in 'xyz')
 
     sim = ExecuteProcess(
         cmd=[python_exec, '-m', 'g1_mujoco.mujoco_test'],
@@ -103,6 +105,8 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'planning_frame': LaunchConfiguration('planning_frame'),
+            **{f'arm_safety_distance_{axis}': LaunchConfiguration(f'arm_safety_distance_{axis}')
+               for axis in 'xyz'},
         }]
     )
 

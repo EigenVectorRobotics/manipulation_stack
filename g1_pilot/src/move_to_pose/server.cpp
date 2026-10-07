@@ -67,6 +67,9 @@ void MoveToPoseServer::declare_parameters_()
     declare_parameter<double>("replan_position_delta", 0.005);
     declare_parameter<double>("replan_orientation_delta", 0.05);
     declare_parameter<double>("replan_min_interval", 0.25);
+    declare_parameter<double>("arm_safety_distance_x", 0.0);
+    declare_parameter<double>("arm_safety_distance_y", 0.0);
+    declare_parameter<double>("arm_safety_distance_z", 0.0);
     frame_ = get_parameter("planning_frame").as_string();
     control_period_ = get_parameter("control_period").as_double();
 }

@@ -66,6 +66,8 @@ def generate_launch_description():
             'right_ee_pose_topic': LaunchConfiguration('right_ee_pose_topic'),
             'traj_topic': LaunchConfiguration('traj_topic'),
             'planning_frame': LaunchConfiguration('target_frame_arm'),
+            **{f'arm_safety_distance_{axis}': LaunchConfiguration(f'arm_safety_distance_{axis}')
+               for axis in 'xyz'},
         }.items(),
     )
 
@@ -99,12 +101,6 @@ def generate_launch_description():
             'left_ee_pose_topic': LaunchConfiguration('left_ee_pose_topic'),
             'right_ee_pose_topic': LaunchConfiguration('right_ee_pose_topic'),
             'move_to_pose_action': LaunchConfiguration('move_to_pose_action'),
-            'arm_safety_distance_x': LaunchConfiguration(
-                'arm_safety_distance_x'),
-            'arm_safety_distance_y': LaunchConfiguration(
-                'arm_safety_distance_y'),
-            'arm_safety_distance_z': LaunchConfiguration(
-                'arm_safety_distance_z'),
         }]
     )
 
