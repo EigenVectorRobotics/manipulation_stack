@@ -43,9 +43,9 @@ class VisualServoArmNode(Node):
         self._cb_group = cb_group
 
         # ── Static parameters (captured once for sub/pub/client setup) ──
-        self.filtered_pose_upright_topic = self.declare_parameter(
-            'filtered_pose_upright_topic',
-            '/track_3d/selected_normal_pose_filtered/arm_upright').value
+        self.filtered_pose_topic = self.declare_parameter(
+            'filtered_pose_topic',
+            '/track_3d/selected_normal_pose_filtered/arm_approach').value
         self.keyboard_input_topic = self.declare_parameter(
             'keyboard_input_topic', '/keyboard_input').value
         self.left_ee_pose_topic = self.declare_parameter(
@@ -86,7 +86,7 @@ class VisualServoArmNode(Node):
 
         # ── Subscribers ──
         self.create_subscription(
-            PoseStamped, self.filtered_pose_upright_topic,
+            PoseStamped, self.filtered_pose_topic,
             self._filtered_pose_cb, 5, callback_group=cb_group)
         self.create_subscription(
             Bool, '/track_3d/is_tracking',
@@ -283,7 +283,7 @@ class VisualServoArmNode(Node):
         goal = MoveToPose.Goal()
         goal.target_pose = target_pose
         goal.left_arm = bool(self._left_arm)
-        goal.target_topic = self.filtered_pose_upright_topic
+        goal.target_topic = self.filtered_pose_topic
 
         self.get_logger().info('Sending move_to_pose goal ...')
         try:

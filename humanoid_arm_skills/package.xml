@@ -10,6 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclpy</depend>
+  <depend>rcl_interfaces</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>geometry_msgs</depend>
@@ -21,6 +22,9 @@
   <exec_depend>g1_pilot</exec_depend>
   <exec_depend>unitree_interface</exec_depend>
   <exec_depend>foxglove_bridge</exec_depend>
+
+  <test_depend>python3-scipy</test_depend>
+  <test_depend>tf2_msgs</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

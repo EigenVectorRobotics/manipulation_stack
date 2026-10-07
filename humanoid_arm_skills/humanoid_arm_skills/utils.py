@@ -48,6 +48,38 @@ def average_quaternions(quaternions: np.ndarray) -> np.ndarray:
     return avg / np.linalg.norm(avg)
 
 
+def quaternion_ema(previous: np.ndarray, current: np.ndarray, alpha: float) -> np.ndarray:
+    """Interpolate unit quaternions along their shortest arc by the new-sample weight."""
+    dot = float(np.dot(previous, current))
+    if dot < 0.0:
+        current = -current
+        dot = -dot
+    dot = float(np.clip(dot, 0.0, 1.0))
+    if dot > 0.9995:
+        result = (1.0 - alpha) * previous + alpha * current
+    else:
+        angle = np.arccos(dot)
+        result = (np.sin((1.0 - alpha) * angle) * previous
+                  + np.sin(alpha * angle) * current) / np.sin(angle)
+    return result / np.linalg.norm(result)
+
+
+def approach_pose(pose: Pose) -> Pose:
+    """Reverse the surface normal about local Z while preserving its full tilt."""
+    q = pose.orientation
+    quaternion = np.array([q.x, q.y, q.z, q.w], dtype=float)
+    norm = np.linalg.norm(quaternion)
+    if not np.isfinite(norm) or norm == 0.0:
+        raise ValueError('Surface orientation must be a finite, nonzero quaternion')
+    x, y, z, w = quaternion / norm
+    result = Pose()
+    result.position.x = pose.position.x
+    result.position.y = pose.position.y
+    result.position.z = pose.position.z
+    result.orientation = Quaternion(x=float(y), y=float(-x), z=float(w), w=float(-z))
+    return result
+
+
 def upright_pose(pose: Pose, flip: bool = False) -> Pose:
     """Return a pose with the same position but a yaw-only (Z-up) orientation.
 

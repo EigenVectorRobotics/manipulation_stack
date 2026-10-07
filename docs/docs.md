@@ -530,8 +530,8 @@ Generic per-axis moving-average filter with outlier rejection.
 - Position outliers: `> position_outlier_std × σ` from mean of buffer.
 - Orientation outliers (`PoseStamped`): angular distance > `orientation_outlier_rad` from buffer mean (eigenvector quaternion average, Markley method).
 - Orientation outliers (`Pose2D`): circular-mean angle distance.
-- Optionally TF-transforms input into `target_frame_arm` before filtering.
-- Publishes a second `<output>_upright` topic for `PoseStamped` (yaw-only, Z-up version) — this is what the visual-servo skill consumes.
+- TF-transforms input into `target_frame_arm` at its observation timestamp before filtering; missing timestamps and unavailable transforms are rejected. Output retains the latest input timestamp.
+- Publishes `<output>_approach` with the full orientation rotated 180° about local Z, directing the approach into the surface. The visual-servo skill consumes this through `filtered_pose_topic`; `<output>_upright` remains a yaw-only view.
 
 Buffer is reset if no input arrives within `lost_timeout` (default 5 s).
 
@@ -546,7 +546,7 @@ Test fixture. Publishes a configurable mean pose with Gaussian noise added to po
 1. `g1_description/display.launch.py` (conditional on `PublishTF`)
 2. `g1_pilot/controller.launch.py` (joint trajectory action server)
 3. `g1_pilot/plan_trajectory.launch.py` (planner service)
-4. `pose_filtering` node (filters `track_3d/selected_normal_pose` → `…_filtered/arm` and `_filtered/arm_upright`)
+4. `pose_filtering` node (filters `track_3d/selected_normal_pose` → `…_filtered/arm`, `_filtered/arm_approach`, and `_filtered/arm_upright`)
 5. `humanoid_arm_vs` action server
 
 ---

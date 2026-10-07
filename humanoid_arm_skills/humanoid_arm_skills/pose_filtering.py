@@ -23,12 +23,12 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
-from rclpy.executors import ExternalShutdownException
-from rclpy.time import Time
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 
 from geometry_msgs.msg import Pose2D, PoseStamped, Quaternion
 
 from humanoid_arm_skills.utils import (
+    approach_pose,
     average_quaternions,
     quaternion_angular_distance,
     normalize_angle,
@@ -80,6 +80,8 @@ class PoseFilterNode(Node):
             self.pub = self.create_publisher(PoseStamped, output_topic, 5)
             self.upright_pub = self.create_publisher(
                 PoseStamped, f'{output_topic}_upright', 5)
+            self.approach_pub = self.create_publisher(
+                PoseStamped, f'{output_topic}_approach', 5)
         else:
             self.create_subscription(
                 Pose2D, input_topic, self._pose2d_cb, 5)
@@ -97,19 +99,26 @@ class PoseFilterNode(Node):
 
     # ── PoseStamped ──
 
-    def _pose_stamped_cb(self, msg: PoseStamped):
-        # Optional TF transform
+    def _transform_pose(self, msg):
         if self.tf_buffer and self.target_frame:
+            if msg.header.stamp.sec == 0 and msg.header.stamp.nanosec == 0:
+                self.get_logger().warn('Skipping pose without an observation timestamp', throttle_duration_sec=2.0)
+                return None
             try:
-                msg.header.stamp = Time(seconds=0).to_msg()
                 msg = self.tf_buffer.transform(
                     msg, self.target_frame,
                     timeout=Duration(seconds=self.get_parameter("tf_timeout").value))
             except tf2_ros.TransformException as e:
                 self.get_logger().warn(
                     f'TF: {e}', throttle_duration_sec=2.0)
-                return
+                return None
+        return msg
 
+    def _pose_stamped_cb(self, msg):
+        # (1) Transform and buffer the observation at its timestamp.
+        msg = self._transform_pose(msg)
+        if msg is None:
+            return
         pos = np.array([
             msg.pose.position.x,
             msg.pose.position.y,
@@ -122,7 +131,7 @@ class PoseFilterNode(Node):
             msg.pose.orientation.w,
         ])
 
-        # Always add to buffer so window adapts over time
+        # (2) Update the observation buffers.
         self.position_buffer.append(pos)
         self.orientation_buffer.append(quat)
         self.last_input_time = self.get_clock().now().nanoseconds
@@ -130,11 +139,10 @@ class PoseFilterNode(Node):
         if len(self.position_buffer) < self.get_parameter("min_samples").value:
             return
 
-        # Filter inliers for the average
+        # (3) Reject position outliers.
         positions = np.array(self.position_buffer)
         quats = np.array(self.orientation_buffer)
 
-        # Position: keep samples within std threshold
         pos_mean = np.mean(positions, axis=0)
         pos_std = np.maximum(np.std(positions, axis=0), 1e-6)
         pos_mask = np.all(
@@ -142,7 +150,7 @@ class PoseFilterNode(Node):
             <= self.get_parameter("position_outlier_std").value * pos_std,
             axis=1)
 
-        # Orientation: keep samples within angular threshold
+        # (4) Reject orientation outliers.
         avg_q = average_quaternions(quats)
         ori_mask = np.array([
             quaternion_angular_distance(
@@ -156,11 +164,12 @@ class PoseFilterNode(Node):
         if np.sum(inlier_mask) < self.get_parameter("min_samples").value:
             return
 
+        # (5) Publish the filtered pose with the latest input timestamp.
         filt_pos = np.mean(positions[inlier_mask], axis=0)
         filt_quat = average_quaternions(quats[inlier_mask])
 
         out = PoseStamped()
-        out.header.stamp = self.get_clock().now().to_msg()
+        out.header.stamp = msg.header.stamp
         out.header.frame_id = msg.header.frame_id
         out.pose.position.x = float(filt_pos[0])
         out.pose.position.y = float(filt_pos[1])
@@ -169,6 +178,12 @@ class PoseFilterNode(Node):
             x=float(filt_quat[0]), y=float(filt_quat[1]),
             z=float(filt_quat[2]), w=float(filt_quat[3]))
         self.pub.publish(out)
+
+        # (6) Publish the approach orientation and the optional yaw-only view.
+        approach_out = PoseStamped()
+        approach_out.header = out.header
+        approach_out.pose = approach_pose(out.pose)
+        self.approach_pub.publish(approach_out)
 
         upright_out = PoseStamped()
         upright_out.header = out.header
@@ -242,11 +257,14 @@ class PoseFilterNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = PoseFilterNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.try_shutdown()
 

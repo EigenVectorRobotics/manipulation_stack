@@ -15,7 +15,8 @@ def generate_launch_description():
         DeclareLaunchArgument('target_frame_arm',
                               default_value='left_ankle_roll_link',
                               description='TF frame to transform normal pose into'),
-        DeclareLaunchArgument('filter_window_size', default_value='10'),
+        DeclareLaunchArgument('filter_alpha', default_value='0.2',
+                              description='EMA new-observation weight in (0, 1]'),
 
         # humanoid_arm_visual_servoing
         DeclareLaunchArgument('keyboard_input_topic',
@@ -79,7 +80,7 @@ def generate_launch_description():
                 ["'", LaunchConfiguration('normal_pose_topic'), "_filtered/arm'"]),
             'msg_type':     'PoseStamped',
             'target_frame_arm': LaunchConfiguration('target_frame_arm'),
-            'window_size':  LaunchConfiguration('filter_window_size'),
+            'alpha': LaunchConfiguration('filter_alpha'),
         }]
     )
 
@@ -90,9 +91,9 @@ def generate_launch_description():
         name='humanoid_arm_vs',
         output='screen',
         parameters=[{
-            'filtered_pose_upright_topic': PythonExpression(
+            'filtered_pose_topic': PythonExpression(
                 ["'", LaunchConfiguration('normal_pose_topic'),
-                 "_filtered/arm_upright'"]),
+                 "_filtered/arm_approach'"]),
             'keyboard_input_topic': LaunchConfiguration(
                 'keyboard_input_topic'),
             'left_ee_pose_topic': LaunchConfiguration('left_ee_pose_topic'),
