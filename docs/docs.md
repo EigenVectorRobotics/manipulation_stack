@@ -491,7 +491,7 @@ All launch files expose namespace, topic remap, and `PublishTF` (toggle to inclu
 | Script | Module | Purpose |
 |--------|--------|---------|
 | `humanoid_arm_vs` | `humanoid_arm_visual_servoing` | Visual-servoing **action server** (the main skill). |
-| `pose_filtering` | `pose_filtering` | Generic moving-average + outlier-rejection pose filter (`PoseStamped` and `Pose2D`). |
+| `pose_filtering` | `pose_filtering` | Exponential moving-average pose filter (`PoseStamped` and `Pose2D`). |
 | `noisy_pose_publisher` | `noisy_pose_publisher` | Test publisher emitting Gaussian-noisy `PoseStamped` messages. |
 
 ### `humanoid_arm_vs` — `VisualServoingArm` action server
@@ -524,16 +524,16 @@ The skill uses a `ReentrantCallbackGroup` for callbacks and a motion lock for go
 
 ### `pose_filtering`
 
-Generic per-axis moving-average filter with outlier rejection.
+Exponential moving-average filter initialized from the first valid pose.
 
 - Supports `PoseStamped` and `Pose2D` (selected via `msg_type` parameter).
-- Position outliers: `> position_outlier_std × σ` from mean of buffer.
-- Orientation outliers (`PoseStamped`): angular distance > `orientation_outlier_rad` from buffer mean (eigenvector quaternion average, Markley method).
-- Orientation outliers (`Pose2D`): circular-mean angle distance.
+- Position update: `filtered += alpha * (observation - filtered)`.
+- Orientation uses shortest-arc quaternion SLERP for `PoseStamped` and wrapped angular interpolation for `Pose2D`.
+- `alpha` defaults to `0.2`; larger values respond faster and `1.0` disables smoothing. The launch argument is `filter_alpha`; window-size, minimum-sample, and outlier-threshold parameters are removed.
 - TF-transforms input into `target_frame_arm` at its observation timestamp before filtering; missing timestamps and unavailable transforms are rejected. Output retains the latest input timestamp.
 - Publishes `<output>_approach` with the full orientation rotated 180° about local Z, directing the approach into the surface. The visual-servo skill consumes this through `filtered_pose_topic`; `<output>_upright` remains a yaw-only view.
 
-Buffer is reset if no input arrives within `lost_timeout` (default 5 s).
+The estimate resets after `lost_timeout` (default 5 s) or a frame change. Invalid poses are rejected; finite outliers receive the same EMA weight as other observations.
 
 ### `noisy_pose_publisher`
 

@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Pose, PoseStamped, Quaternion, TransformStamped
+from geometry_msgs.msg import Pose, Pose2D, PoseStamped, Quaternion, TransformStamped
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.parameter import Parameter
@@ -54,7 +54,7 @@ class SurfaceTargetTests(unittest.TestCase):
 
     def setUp(self):
         self.node = PoseFilterNode()
-        self.node.set_parameters([Parameter('min_samples', value=1), Parameter('tf_timeout', value=0.0)])
+        self.node.set_parameters([Parameter('tf_timeout', value=0.0)])
         self.node.pub = Mock()
         self.node.approach_pub = Mock()
         self.node.upright_pub = Mock()
@@ -100,7 +100,67 @@ class SurfaceTargetTests(unittest.TestCase):
                 self.node._pose_stamped_cb(observation(seconds))
                 self.node.pub.publish.assert_not_called()
                 self.node.approach_pub.publish.assert_not_called()
-        self.assertEqual(len(self.node.position_buffer), 0)
+        self.assertIsNone(self.node.filtered_position)
+
+    def test_position_step_response_decays_exponentially(self):
+        self.node._pose_stamped_cb(observation())
+        changed = observation()
+        changed.pose.position.x += 1.0
+        for step in range(1, 5):
+            self.node._pose_stamped_cb(changed)
+            filtered = self.node.pub.publish.call_args.args[0]
+            self.assertAlmostEqual(filtered.pose.position.x, 2.5 - 0.8 ** step)
+
+    def test_orientation_ema_preserves_full_rotation(self):
+        initial = observation()
+        initial.pose.orientation = Quaternion(w=1.0)
+        self.node._pose_stamped_cb(initial)
+        changed = observation()
+        self.node._pose_stamped_cb(changed)
+        filtered = self.node.pub.publish.call_args.args[0]
+        target_rotation = Rotation.from_matrix(rotation(changed.pose))
+        expected = Rotation.from_rotvec(0.2 * target_rotation.as_rotvec()).as_matrix()
+        np.testing.assert_allclose(rotation(filtered.pose), expected, atol=1e-12)
+        self.assertAlmostEqual(np.linalg.norm(self.node.filtered_orientation), 1.0)
+
+    def test_quaternion_sign_flip_does_not_move_the_estimate(self):
+        source = observation()
+        self.node._pose_stamped_cb(source)
+        for field in ('x', 'y', 'z', 'w'):
+            setattr(source.pose.orientation, field, -getattr(source.pose.orientation, field))
+        self.node._pose_stamped_cb(source)
+        filtered = self.node.pub.publish.call_args.args[0]
+        np.testing.assert_allclose(rotation(filtered.pose), rotation(source.pose), atol=1e-12)
+
+    def test_pose2d_takes_shortest_path_across_angle_wrap(self):
+        self.node.is_3d = False
+        self.node.set_parameters([Parameter('alpha', value=0.5)])
+        self.node._pose2d_cb(Pose2D(x=0.0, y=0.0, theta=float(np.deg2rad(179))))
+        self.node._pose2d_cb(Pose2D(x=2.0, y=4.0, theta=float(np.deg2rad(-179))))
+        filtered = self.node.pub.publish.call_args.args[0]
+        self.assertAlmostEqual(filtered.x, 1.0)
+        self.assertAlmostEqual(filtered.y, 2.0)
+        self.assertAlmostEqual(abs(filtered.theta), np.pi)
+
+    def test_timeout_reinitializes_from_the_next_observation(self):
+        self.node._pose_stamped_cb(observation())
+        self.node.last_input_time -= 6_000_000_000
+        changed = observation()
+        changed.pose.position.x = 20.0
+        self.node._pose_stamped_cb(changed)
+        self.assertAlmostEqual(self.node.pub.publish.call_args.args[0].pose.position.x, 21.0)
+
+    def test_alpha_updates_are_validated(self):
+        for value in (0.0, -0.1, 1.1, float('nan')):
+            result = self.node.set_parameters([Parameter('alpha', value=value)])[0]
+            self.assertFalse(result.successful)
+        self.assertEqual(self.node.get_parameter('alpha').value, 0.2)
+        self.node._pose_stamped_cb(observation())
+        self.assertTrue(self.node.set_parameters([Parameter('alpha', value=1.0)])[0].successful)
+        changed = observation()
+        changed.pose.position.x = 5.0
+        self.node._pose_stamped_cb(changed)
+        self.assertAlmostEqual(self.node.pub.publish.call_args.args[0].pose.position.x, 6.0)
 
     def setup_delayed_tf(self):
         self.node.tf_buffer.clear()
