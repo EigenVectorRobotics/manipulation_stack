@@ -337,6 +337,30 @@ JointSpacePlanner::JointSpacePlanner(
 
 JointSpacePlanner::~JointSpacePlanner() {}
 
+JointTrajectory JointSpacePlanner::brake(const JointState& state, double time_step,
+                                       [[maybe_unused]] double max_joint_vel, double max_joint_acc) {
+    double max_speed = 0.0;
+    for (double velocity : state.velocity) max_speed = std::max(max_speed, std::abs(velocity));
+    const std::size_t steps = static_cast<std::size_t>(std::ceil(max_speed / max_joint_acc / time_step));
+    const double duration = steps * time_step;
+    const std::size_t joints = state.name.size();
+    JointTrajectory trajectory{state.name,
+        std::vector<std::vector<double>>(joints, std::vector<double>(steps + 1)),
+        std::vector<std::vector<double>>(joints, std::vector<double>(steps + 1)),
+        std::vector<std::vector<double>>(joints, std::vector<double>(steps + 1)), time_step};
+    for (std::size_t j = 0; j < joints; ++j) {
+        const double acceleration = steps ? -state.velocity[j] / duration : 0.0;
+        for (std::size_t k = 0; k <= steps; ++k) {
+            const double t = k * time_step;
+            const double velocity = k == steps ? 0.0 : state.velocity[j] + acceleration * t;
+            trajectory.position[j][k] = state.position[j] + 0.5 * (state.velocity[j] + velocity) * t;
+            trajectory.velocity[j][k] = velocity;
+            trajectory.acceleration[j][k] = k == steps ? 0.0 : acceleration;
+        }
+    }
+    return trajectory;
+}
+
 JointState JointSpacePlanner::poseToJointConfig(
     const Eigen::MatrixXd& pose,
     const int refinement_passes,

@@ -369,6 +369,10 @@ OMPL **RRT***-based joint-space motion planner. Matches the polynomial generator
 
 Velocity/acceleration arguments are accepted for API parity but ignored (RRT* is kinematic). `setLeftArm(bool)` switches arms at runtime, exposed on `Humanoid` as well as on the planner — **callers must set it before every plan**, since it defaults to `false` (right arm) and is sticky across calls.
 
+**Braking:** `Humanoid::brake(state, time_step=0.01, max_joint_vel=1.0, max_joint_acc=2.0)` delegates to `JointSpacePlanner::brake`, which uses the largest absolute starting velocity to calculate one shared stop time and sample count. A quadratic spline stops all joints together, preserving input joint order and initial position/velocity.
+
+The caller supplies valid, complete states within the velocity limit; braking monotonically decreases speed, with no input validation, collision checks, or position-limit checks. Acceleration changes discontinuously at braking boundaries; there is no jerk bound.
+
 #### `VisualServoPlanner` *(extends `JointSpacePlanner`)*
 
 Adds a **two-phase approach** for manipulation tasks:
@@ -496,7 +500,7 @@ All launch files expose namespace, topic remap, and `PublishTF` (toggle to inclu
 
 ### `humanoid_arm_vs` — `VisualServoingArm` action server
 
-The skill sends one `MoveToPose` goal and streams filtered target poses to its `target_topic`. `move_to_pose` replans the active trajectory when that target moves.
+The skill sends one `MoveToPose` goal and streams filtered target poses to its `target_topic`. When that target moves, `move_to_pose` brakes from the last commanded position and velocity, holds the braking endpoint, then replans from that endpoint and tracks the replacement.
 
 **Pipeline per goal:**
 
@@ -926,6 +930,8 @@ ctest
 | `test_ik` | Dual-arm IK solve, timing, CasADi integration. |
 | `test_control` | `Humanoid` initialisation, controller setup. |
 | `test_mp_ik` | `JointSpacePlanner` trajectory generation, IK along the trajectory. |
+| `test_brake` | Braking endpoints, earliest feasible sample timing, and interpolated velocity/acceleration limits. |
+| `benchmark_brake` | Generation latency for 7, 14, and 29 joints; 20,000 calls per case. |
 | `math_unittest` *(disabled)* | Polynomial math: power vectors, differentiation matrices, evaluation. |
 | `line_unittest` *(disabled)* | Boundary conditions for the polynomial trajectory generator. |
 

@@ -8,8 +8,9 @@
  *
  * A goal may also name a target_topic. While that goal runs, PoseStamped
  * messages on it are the moving target: when the target drifts past
- * replan_position_delta / replan_orientation_delta the worker calls
- * Humanoid::replanTrajectory and swaps the result in. That call reuses the
+ * replan_position_delta / replan_orientation_delta the controller brakes and
+ * holds the endpoint, then the worker calls Humanoid::replanTrajectory.
+ * The controller tracks the replacement once ready. That call reuses the
  * cached RRT* search when the new goal is close to the last one and the arm
  * has not drifted, and falls back to a full plan when it is not, so tracking a
  * moving target costs far less than replanning from scratch.
@@ -56,6 +57,7 @@
 
 #include "humanoid_manipulation_interfaces/action/move_to_pose.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -207,6 +209,7 @@ private:
     rclcpp::Time traj_start_;
     double error_ = 0.0;
     bool tracking_ = false;
+    bool braking_ = false;
     bool holding_ = false;
     Eigen::MatrixXd planned_for_;       // goal pose the live trajectory serves
     bool have_planned_for_ = false;
@@ -380,6 +383,7 @@ private:
         traj_points_.clear();
         idx_ = 0;
         tracking_ = false;
+        braking_ = false;
         holding_ = false;
         hold_command_ = sensor_msgs::msg::JointState();
     }
@@ -416,6 +420,7 @@ private:
             traj_points_.clear();
             idx_ = 0;
             tracking_ = false;
+            braking_ = false;
             holding_ = false;
             hold_command_ = sensor_msgs::msg::JointState();
             return Install::Cancelled;
@@ -425,6 +430,7 @@ private:
         idx_ = 0;
         traj_start_ = get_clock()->now();
         tracking_ = true;
+        braking_ = false;
         holding_ = false;
         hold_command_ = sensor_msgs::msg::JointState();
         planned_for_ = planned_for;
@@ -466,27 +472,45 @@ private:
 
     bool stop_for_replan_(const std::shared_ptr<GoalHandle> & goal, JointState & start)
     {
+        // (1) Replan from the held endpoint once braking finishes.
         std::scoped_lock lock(goal_mutex_, ctrl_mutex_);
         if (active_ != goal || cancel_requested_ || goal->is_canceling()) return false;
-        start = state_;
-        if (start.name.empty()) return false;
-        start.velocity.assign(start.name.size(), 0.0);
-        if (holding_) return true;
-        if (!make_hold_command_()) return false;
+        if (braking_ || state_.name.empty()) return false;
+        if (holding_) {
+            start = state_;
+            start.velocity.assign(start.name.size(), 0.0);
+            for (size_t i = 0; i < hold_command_.name.size(); ++i) {
+                const auto it = std::find(start.name.begin(), start.name.end(), hold_command_.name[i]);
+                if (it != start.name.end())
+                    start.position[std::distance(start.name.begin(), it)] = hold_command_.position[i];
+            }
+            return true;
+        }
+        if (traj_points_.empty()) return false;
 
-        traj_points_.clear();
+        // (2) Replace the active trajectory with braking from its last commanded state.
+        const auto & point = traj_points_[std::min(idx_, traj_points_.size() - 1)];
+        JointState brake_start{traj_names_, point.positions, point.velocities, {}};
+        auto brake = convertToTrajectory(planner_->brake(
+            brake_start, get_parameter("plan_time_step").as_double(),
+            get_parameter("max_joint_vel").as_double(),
+            get_parameter("max_joint_acc").as_double()), frame_, get_clock()->now());
+        traj_points_ = std::move(brake.points);
         idx_ = 0;
-        tracking_ = false;
-        holding_ = true;
-        hold_command_.header.stamp = get_clock()->now();
-        command_pub_->publish(hold_command_);
+        traj_start_ = get_clock()->now();
+        tracking_ = true;
+        braking_ = true;
+        holding_ = false;
+        hold_command_ = sensor_msgs::msg::JointState();
 
+        // (3) Clear the displayed path while the controller executes braking.
         nav_msgs::msg::Path empty_path;
         empty_path.header.frame_id = frame_;
-        empty_path.header.stamp = hold_command_.header.stamp;
+        empty_path.header.stamp = traj_start_;
         path_pub_->publish(empty_path);
-        RCLCPP_INFO(get_logger(), "Trajectory cleared; holding current waypoint during replan");
-        return true;
+        RCLCPP_INFO(get_logger(), "Braking before replan: %zu waypoints, %.3f s",
+                    traj_points_.size(), rclcpp::Duration(traj_points_.back().time_from_start).seconds());
+        return false;
     }
 
     void run_(const std::shared_ptr<GoalHandle> & goal)
@@ -587,10 +611,11 @@ private:
 
         {
             std::lock_guard<std::mutex> lock(ctrl_mutex_);
-            if (!have_planned_for_ ||
+            if (braking_) return;
+            if (!holding_ && (!have_planned_for_ ||
                 !pose_moved_(planned_for_, target,
                              get_parameter("replan_position_delta").as_double(),
-                             get_parameter("replan_orientation_delta").as_double())) {
+                             get_parameter("replan_orientation_delta").as_double()))) {
                 return;
             }
         }
@@ -795,9 +820,9 @@ private:
 
     void control_tick_()
     {
+        // (1) Update feedback.
+        // (1.1) Look up the frame and check control timing.
         const Eigen::MatrixXd transform = pelvis_to_planning_frame_();
-        /* A tracking loop that quietly stops running is the worst failure this
-         * node has, so it reports its own overruns. */
         const auto tick = std::chrono::steady_clock::now();
         if (last_tick_.time_since_epoch().count() != 0) {
             const double dt = std::chrono::duration<double>(tick - last_tick_).count();
@@ -808,6 +833,7 @@ private:
         }
         last_tick_ = tick;
 
+        // (1.2) Update the model and publish feedback poses.
         std::lock_guard<std::mutex> lock(ctrl_mutex_);
 
         if (state_.name.empty()) return;
@@ -822,13 +848,13 @@ private:
                 frame_, get_clock()->now()));
         }
 
+        // (2) Hold the endpoint or advance the current trajectory.
         if (holding_) {
             hold_command_.header.stamp = get_clock()->now();
             command_pub_->publish(hold_command_);
             return;
         }
 
-        // No trajectory means no commands. This is what cancelling relies on.
         if (traj_points_.empty() || idx_ >= traj_points_.size()) return;
 
         const double elapsed = (get_clock()->now() - traj_start_).seconds();
@@ -842,6 +868,7 @@ private:
         const auto & point = traj_points_[idx_];
         error_ = joint_error_(point.positions);
 
+        // (3) Publish position, velocity, and feedforward torque.
         sensor_msgs::msg::JointState cmd;
         cmd.header.stamp = get_clock()->now();
         cmd.name = traj_names_;
@@ -853,10 +880,20 @@ private:
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000, "Waypoint %zu/%zu, error %f",
                              idx_ + 1, traj_points_.size(), error_);
 
+        // (4) Hold after braking; finish the action after a regular trajectory.
         const bool finished = idx_ >= last &&
             rclcpp::Duration(traj_points_[last].time_from_start).seconds() <= elapsed;
         if (finished) {
-            ++idx_;        // past the end: the monitor reads this as complete
+            if (braking_ && make_hold_command_()) {
+                braking_ = false;
+                holding_ = true;
+                tracking_ = false;
+                traj_points_.clear();
+                idx_ = 0;
+                RCLCPP_INFO(get_logger(), "Braking complete; holding endpoint for replanning");
+            } else {
+                ++idx_;
+            }
             cv_.notify_all();
         }
     }

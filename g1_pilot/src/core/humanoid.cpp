@@ -411,6 +411,15 @@ Humanoid::replanTrajectory(
     );
 }
 
+JointTrajectory Humanoid::brake(
+    const JointState& state,
+    double time_step,
+    double max_joint_vel,
+    double max_joint_acc
+){
+    return impl_->motion_planner->brake(state, time_step, max_joint_vel, max_joint_acc);
+}
+
 Eigen::MatrixXd Humanoid::forward_kinematics(
     const Eigen::VectorXd& q,
     const bool left

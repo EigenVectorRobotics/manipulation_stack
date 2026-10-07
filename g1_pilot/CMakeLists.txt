@@ -77,6 +77,14 @@ target_link_libraries(g1_pilot
 
 if(BUILD_TESTING)
     find_package(GTest REQUIRED)
+
+    add_executable(test_brake test/arm_mp/test_brake.cpp)
+    target_include_directories(test_brake PRIVATE src include)
+    target_link_libraries(test_brake PRIVATE g1_pilot pinocchio::pinocchio GTest::gtest_main)
+
+    add_executable(benchmark_brake test/arm_mp/benchmark_brake.cpp)
+    target_include_directories(benchmark_brake PRIVATE src include)
+    target_link_libraries(benchmark_brake PRIVATE g1_pilot pinocchio::pinocchio)
     
     add_executable(test_ik test/arm_ik/test_ik.cpp)
     target_link_libraries(test_ik PRIVATE g1_pilot GTest::gtest_main)
@@ -99,6 +107,7 @@ if(BUILD_TESTING)
 
     if (RUN_TESTING)
         include(GoogleTest)
+        gtest_discover_tests(test_brake)
         gtest_discover_tests(test_ik WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)
         gtest_discover_tests(test_control WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)
         # gtest_discover_tests(math_unittest WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)

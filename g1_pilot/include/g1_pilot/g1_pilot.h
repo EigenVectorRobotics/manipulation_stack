@@ -166,6 +166,13 @@ public:
         double max_joint_acc = 2.0
     );
 
+    JointTrajectory brake(
+        const JointState& state,
+        double time_step = 0.01,
+        double max_joint_vel = 1.0,
+        double max_joint_acc = 2.0
+    );
+
     Eigen::MatrixXd forward_kinematics(
         const Eigen::VectorXd& q,
         const bool left = false
@@ -218,4 +225,4 @@ protected:
 } // HumanoidPilot namespace
 
 
-#endif
+#endif // G1_PILOT_H

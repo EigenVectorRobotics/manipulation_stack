@@ -32,6 +32,14 @@ class JointSpacePlanner {
         );
         virtual ~JointSpacePlanner();
 
+        // Brake supplied joints from a valid state within max_joint_vel using quadratic deceleration and a terminal hold.
+        static JointTrajectory brake(
+            const JointState& state,
+            double time_step = 0.01,
+            double max_joint_vel = 1.0,
+            double max_joint_acc = 2.0
+        );
+
         /**
          * @param goal_pose       4x4 SE(3) goal end-effector pose
          * @param start_pose      4x4 SE(3) start end-effector pose
