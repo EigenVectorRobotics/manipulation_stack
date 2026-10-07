@@ -3,12 +3,13 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
-from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rcl_interfaces.msg import SetParametersResult
 
 from geometry_msgs.msg import Pose2D, PoseStamped, Quaternion
 
 from humanoid_arm_skills.utils import (
+    align_surface_z,
     approach_pose,
     normalize_angle,
     quaternion_ema,
@@ -22,7 +23,7 @@ import tf2_geometry_msgs  # noqa: F401 — registers PoseStamped transform
 class PoseFilterNode(Node):
     """Exponential pose filter with timestamped frame transforms."""
 
-    def __init__(self):
+    def __init__(self, tf_buffer: tf2_ros.Buffer | None = None):
         # (1) Configure topics and smoothing.
         super().__init__('pose_filter')
         input_topic = self.declare_parameter('input_topic', '/pose_in').value
@@ -42,10 +43,12 @@ class PoseFilterNode(Node):
         self.filter_frame = None
         self.last_input_time = None
         self.is_3d = (msg_type == 'PoseStamped')
-        self.tf_buffer = None
+        self.tf_buffer = tf_buffer
+        self.tf_listener = None
         if self.is_3d and self.target_frame:
-            self.tf_buffer = tf2_ros.Buffer()
-            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+            if self.tf_buffer is None:
+                self.tf_buffer = tf2_ros.Buffer()
+                self.tf_listener = self._create_tf_listener()
 
         # (3) Connect pose inputs and outputs.
         if self.is_3d:
@@ -57,12 +60,28 @@ class PoseFilterNode(Node):
             self.create_subscription(Pose2D, input_topic, self._pose2d_cb, 5)
             self.pub = self.create_publisher(Pose2D, output_topic, 5)
 
-        # (4) Reset stale estimates and report configuration.
-        self.create_timer(0.1, self._check_timeout)
+        # (4) Report configuration.
         self.get_logger().debug(
             f'Pose EMA: {input_topic} ({msg_type}) -> {output_topic}'
             + (f' [tf -> {self.target_frame}]' if self.target_frame else ''))
         self.get_logger().info('pose_filtering: ready')
+
+    def _create_tf_listener(self):
+        tf_node = Node(
+            f'{self.get_name()}_tf', context=self.context, namespace=self.get_namespace(),
+            use_global_arguments=False, enable_rosout=False, start_parameter_services=False,
+            cli_args=['--ros-args', '-r', f'/tf:={self.resolve_topic_name("/tf")}',
+                      '-r', f'/tf_static:={self.resolve_topic_name("/tf_static")}'])
+        return tf2_ros.TransformListener(self.tf_buffer, tf_node, spin_thread=True)
+
+    def destroy_node(self):
+        if self.tf_listener is not None:
+            self.tf_listener.executor.shutdown()
+            self.tf_listener.dedicated_listener_thread.join()
+            self.tf_listener.unregister()
+            self.tf_listener.node.destroy_node()
+            self.tf_listener = None
+        return super().destroy_node()
 
     def _validate_parameters(self, parameters):
         for parameter in parameters:
@@ -78,19 +97,22 @@ class PoseFilterNode(Node):
         self.filter_frame = None
         self.last_input_time = None
 
-    def _update_filter(self, position, orientation):
+    def _update_filter(self, position, orientation, stamp_ns):
         alpha = self.get_parameter('alpha').value
+        if self.is_3d:
+            orientation = align_surface_z(orientation)
         if self.filtered_position is None:
             self.filtered_position = position.copy()
             self.filtered_orientation = orientation
         else:
             self.filtered_position += alpha * (position - self.filtered_position)
             if self.is_3d:
-                self.filtered_orientation = quaternion_ema(self.filtered_orientation, orientation, alpha)
+                self.filtered_orientation = align_surface_z(
+                    quaternion_ema(self.filtered_orientation, orientation, alpha))
             else:
                 difference = normalize_angle(orientation - self.filtered_orientation)
                 self.filtered_orientation = normalize_angle(self.filtered_orientation + alpha * difference)
-        self.last_input_time = self.get_clock().now().nanoseconds
+        self.last_input_time = stamp_ns
 
     def _transform_pose(self, msg):
         if self.tf_buffer and self.target_frame:
@@ -117,11 +139,12 @@ class PoseFilterNode(Node):
         if not np.all(np.isfinite(position)) or not np.isfinite(norm) or norm == 0.0:
             self.get_logger().warn('Skipping invalid pose', throttle_duration_sec=2.0)
             return
-        self._check_timeout()
+        stamp_ns = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
+        self._check_timeout(stamp_ns)
         if self.filter_frame != msg.header.frame_id:
             self._reset_filter()
             self.filter_frame = msg.header.frame_id
-        self._update_filter(position, orientation / norm)
+        self._update_filter(position, orientation / norm, stamp_ns)
         self._publish_pose(msg.header)
 
     def _publish_pose(self, header):
@@ -145,25 +168,26 @@ class PoseFilterNode(Node):
         if not np.all(np.isfinite(position)) or not np.isfinite(msg.theta):
             self.get_logger().warn('Skipping invalid pose', throttle_duration_sec=2.0)
             return
-        self._check_timeout()
-        self._update_filter(position, normalize_angle(msg.theta))
+        stamp_ns = self.get_clock().now().nanoseconds
+        self._check_timeout(stamp_ns)
+        self._update_filter(position, normalize_angle(msg.theta), stamp_ns)
         out = Pose2D()
         out.x, out.y = self.filtered_position.tolist()
         out.theta = float(self.filtered_orientation)
         self.pub.publish(out)
 
-    def _check_timeout(self):
+    def _check_timeout(self, stamp_ns):
         if self.last_input_time is None:
             return
-        elapsed = (self.get_clock().now().nanoseconds - self.last_input_time) * 1e-9
-        if elapsed > self.get_parameter('lost_timeout').value:
+        elapsed = (stamp_ns - self.last_input_time) * 1e-9
+        if elapsed < 0.0 or elapsed > self.get_parameter('lost_timeout').value:
             self._reset_filter()
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = PoseFilterNode()
-    executor = MultiThreadedExecutor(num_threads=2)
+    executor = SingleThreadedExecutor()
     executor.add_node(node)
     try:
         executor.spin()

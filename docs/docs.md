@@ -541,9 +541,18 @@ Exponential moving-average filter initialized from the first valid pose.
 - Orientation uses shortest-arc quaternion SLERP for `PoseStamped` and wrapped angular interpolation for `Pose2D`.
 - `alpha` defaults to `0.2`; larger values respond faster and `1.0` disables smoothing. The launch argument is `filter_alpha`; window-size, minimum-sample, and outlier-threshold parameters are removed.
 - TF-transforms input into `target_frame_arm` at its observation timestamp before filtering; missing timestamps and unavailable transforms are rejected. Output retains the latest input timestamp.
-- Publishes `<output>_approach` with the full orientation rotated 180° about local Z, directing the approach into the surface. The visual-servo skill consumes this through `filtered_pose_topic`; `<output>_upright` remains a yaw-only view.
+- Preserves the surface normal (local X) and chooses local Z closest to the filtering frame's +Z before and after orientation smoothing.
+- Publishes `<output>_approach` rotated 180° about local Z, preserving normal tilt and directing the approach into the surface. The visual-servo skill consumes this through `filtered_pose_topic`; `<output>_upright` remains a yaw-only view.
 
-The estimate resets after `lost_timeout` (default 5 s) or a frame change. Invalid poses are rejected; finite outliers receive the same EMA weight as other observations.
+The estimate resets on an observation timestamp gap exceeding `lost_timeout` (default 5 s), backward observation time, or a frame change. Invalid poses are rejected; finite outliers receive the same EMA weight as other observations.
+
+Pose filtering uses a single-threaded executor with a dedicated TF listener thread. Stamped-pose filtering depends on observation timestamps; executor delays and `/clock` changes do not reset its estimate.
+
+`test/offline_pose_filter.py` loads recorded TF and calls the same `PoseFilterNode._pose_stamped_cb` used online, including approach and upright outputs. It writes JSON without clock playback; `--stamps` selects a JSON list of observation timestamps for comparing identical input sequences.
+
+```bash
+PYTHONPATH=humanoid_arm_skills python humanoid_arm_skills/test/offline_pose_filter.py BAG OUTPUT.json --frame left_ankle_roll_link --alpha 0.2
+```
 
 ### `noisy_pose_publisher`
 

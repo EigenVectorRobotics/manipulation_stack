@@ -64,6 +64,20 @@ def quaternion_ema(previous: np.ndarray, current: np.ndarray, alpha: float) -> n
     return result / np.linalg.norm(result)
 
 
+def align_surface_z(quaternion: np.ndarray) -> np.ndarray:
+    """Preserve local X and align local Z closest to the reference frame's +Z."""
+    x, y, z, w = quaternion / np.linalg.norm(quaternion)
+    normal_x = 1.0 - 2.0 * (y * y + z * z)
+    normal_y = 2.0 * (x * y + w * z)
+    normal_z = 2.0 * (x * z - w * y)
+    horizontal = np.hypot(normal_x, normal_y)
+    yaw = np.arctan2(normal_y, normal_x) if horizontal > 1e-12 else 0.0
+    pitch = np.arctan2(-normal_z, horizontal)
+    sy, cy = np.sin(yaw / 2.0), np.cos(yaw / 2.0)
+    sp, cp = np.sin(pitch / 2.0), np.cos(pitch / 2.0)
+    return np.array([-sy * sp, cy * sp, sy * cp, cy * cp])
+
+
 def approach_pose(pose: Pose) -> Pose:
     """Reverse the surface normal about local Z while preserving its full tilt."""
     q = pose.orientation

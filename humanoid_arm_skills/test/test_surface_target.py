@@ -6,14 +6,13 @@ from unittest.mock import Mock
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Pose, Pose2D, PoseStamped, Quaternion, TransformStamped
-from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
 from scipy.spatial.transform import Rotation
 from tf2_msgs.msg import TFMessage
 
 from humanoid_arm_skills.pose_filtering import PoseFilterNode
-from humanoid_arm_skills.utils import approach_pose
+from humanoid_arm_skills.utils import align_surface_z, approach_pose
 
 
 def rotation(pose):
@@ -86,7 +85,8 @@ class SurfaceTargetTests(unittest.TestCase):
         filtered = self.node.pub.publish.call_args.args[0]
         approach = self.node.approach_pub.publish.call_args.args[0]
         self.assertAlmostEqual(filtered.pose.position.x, 1.5)
-        np.testing.assert_allclose(rotation(filtered.pose), rotation(source.pose), atol=1e-12)
+        np.testing.assert_allclose(rotation(filtered.pose)[:, 0], rotation(source.pose)[:, 0], atol=1e-12)
+        self.assert_z_closest_to_up(rotation(filtered.pose))
         np.testing.assert_allclose(rotation(approach.pose)[:, 0], -rotation(source.pose)[:, 0], atol=1e-12)
         self.assertEqual(filtered.header.stamp, source.header.stamp)
         self.assertEqual(approach.header.stamp.sec, 100)
@@ -102,6 +102,22 @@ class SurfaceTargetTests(unittest.TestCase):
                 self.node.approach_pub.publish.assert_not_called()
         self.assertIsNone(self.node.filtered_position)
 
+    def test_z_alignment_uses_the_filtering_frame(self):
+        self.node.target_frame = 'left_ankle_roll_link'
+        camera_tf = transform(100, 0, 1)
+        camera_tf.header.frame_id = self.node.target_frame
+        q = Rotation.from_euler('x', 0.7).as_quat()
+        camera_tf.transform.rotation = Quaternion(**dict(zip(('x', 'y', 'z', 'w'), q.tolist())))
+        self.node.tf_buffer.clear()
+        self.node.tf_buffer.set_transform(camera_tf, 'test')
+        source = observation()
+        self.node._pose_stamped_cb(source)
+        filtered = self.node.pub.publish.call_args.args[0]
+        expected = Rotation.from_quat(q).as_matrix() @ rotation(source.pose)
+        np.testing.assert_allclose(rotation(filtered.pose)[:, 0], expected[:, 0], atol=1e-12)
+        self.assert_z_closest_to_up(rotation(filtered.pose))
+        self.assertEqual(filtered.header.frame_id, self.node.target_frame)
+
     def test_position_step_response_decays_exponentially(self):
         self.node._pose_stamped_cb(observation())
         changed = observation()
@@ -111,26 +127,55 @@ class SurfaceTargetTests(unittest.TestCase):
             filtered = self.node.pub.publish.call_args.args[0]
             self.assertAlmostEqual(filtered.pose.position.x, 2.5 - 0.8 ** step)
 
-    def test_orientation_ema_preserves_full_rotation(self):
+    def assert_z_closest_to_up(self, matrix):
+        normal = matrix[:, 0]
+        projected_up = np.array([0.0, 0.0, 1.0]) - normal[2] * normal
+        np.testing.assert_allclose(matrix[:, 2], projected_up / np.linalg.norm(projected_up), atol=1e-12)
+
+    def test_orientation_ema_preserves_normal_tilt(self):
         initial = observation()
         initial.pose.orientation = Quaternion(w=1.0)
         self.node._pose_stamped_cb(initial)
         changed = observation()
         self.node._pose_stamped_cb(changed)
         filtered = self.node.pub.publish.call_args.args[0]
-        target_rotation = Rotation.from_matrix(rotation(changed.pose))
-        expected = Rotation.from_rotvec(0.2 * target_rotation.as_rotvec()).as_matrix()
-        np.testing.assert_allclose(rotation(filtered.pose), expected, atol=1e-12)
+        target_q = align_surface_z(Rotation.from_matrix(rotation(changed.pose)).as_quat())
+        expected = Rotation.from_rotvec(0.2 * Rotation.from_quat(target_q).as_rotvec()).as_matrix()
+        np.testing.assert_allclose(rotation(filtered.pose)[:, 0], expected[:, 0], atol=1e-12)
+        self.assert_z_closest_to_up(rotation(filtered.pose))
         self.assertAlmostEqual(np.linalg.norm(self.node.filtered_orientation), 1.0)
 
     def test_quaternion_sign_flip_does_not_move_the_estimate(self):
         source = observation()
         self.node._pose_stamped_cb(source)
+        initial = rotation(self.node.pub.publish.call_args.args[0].pose)
         for field in ('x', 'y', 'z', 'w'):
             setattr(source.pose.orientation, field, -getattr(source.pose.orientation, field))
         self.node._pose_stamped_cb(source)
         filtered = self.node.pub.publish.call_args.args[0]
-        np.testing.assert_allclose(rotation(filtered.pose), rotation(source.pose), atol=1e-12)
+        np.testing.assert_allclose(rotation(filtered.pose), initial, atol=1e-12)
+        self.assertEqual(self.node.pub.publish.call_count, 2)
+
+    def test_arbitrary_roll_does_not_move_the_estimate(self):
+        source = observation()
+        self.node._pose_stamped_cb(source)
+        initial = rotation(self.node.pub.publish.call_args.args[0].pose)
+        for roll in np.linspace(-np.pi, np.pi, 13):
+            changed = observation()
+            q = (Rotation.from_matrix(rotation(source.pose)) * Rotation.from_euler('x', roll)).as_quat()
+            changed.pose.orientation = Quaternion(**dict(zip(('x', 'y', 'z', 'w'), q.tolist())))
+            self.node._pose_stamped_cb(changed)
+            np.testing.assert_allclose(rotation(self.node.pub.publish.call_args.args[0].pose), initial, atol=1e-12)
+        self.assertEqual(self.node.pub.publish.call_count, 14)
+
+    def test_alignment_preserves_normals_including_vertical(self):
+        orientations = list(Rotation.random(100, random_state=7).as_quat())
+        orientations.extend(Rotation.from_euler('y', [[np.pi / 2], [-np.pi / 2]]).as_quat())
+        for q in orientations:
+            actual = Rotation.from_quat(align_surface_z(q)).as_matrix()
+            expected = Rotation.from_quat(q).as_matrix()
+            np.testing.assert_allclose(actual[:, 0], expected[:, 0], atol=1e-12)
+            self.assertAlmostEqual(actual[2, 2], np.hypot(expected[0, 0], expected[1, 0]))
 
     def test_pose2d_takes_shortest_path_across_angle_wrap(self):
         self.node.is_3d = False
@@ -149,6 +194,20 @@ class SurfaceTargetTests(unittest.TestCase):
         changed.pose.position.x = 20.0
         self.node._pose_stamped_cb(changed)
         self.assertAlmostEqual(self.node.pub.publish.call_args.args[0].pose.position.x, 21.0)
+
+    def test_stamped_filter_does_not_read_the_execution_clock(self):
+        self.node.get_clock = Mock(side_effect=AssertionError('Filtering must use observation time'))
+        self.node._pose_stamped_cb(observation())
+        self.node._pose_stamped_cb(observation(100, 100_000_000))
+        self.assertEqual(self.node.pub.publish.call_count, 2)
+        self.assertEqual(self.node.last_input_time, 100_100_000_000)
+
+    def test_backward_observation_time_starts_a_new_sequence(self):
+        self.node._pose_stamped_cb(observation(101))
+        self.node._pose_stamped_cb(observation(100))
+        filtered = self.node.pub.publish.call_args.args[0]
+        self.assertAlmostEqual(filtered.pose.position.x, 1.5)
+        self.assertEqual(self.node.last_input_time, 100_000_000_000)
 
     def test_alpha_updates_are_validated(self):
         for value in (0.0, -0.1, 1.1, float('nan')):
@@ -170,16 +229,14 @@ class SurfaceTargetTests(unittest.TestCase):
         original = self.node.tf_buffer.transform
         self.node.tf_buffer.transform = lambda *args, **kwargs: (waiting.set(), original(*args, **kwargs))[1]
         self.node.approach_pub.publish.side_effect = lambda _: published.set()
-        publisher = self.node.create_publisher(PoseStamped, '/pose_in', 5)
-        tf_publisher = self.node.create_publisher(TFMessage, '/tf', 5)
-        timer = self.node.create_timer(0.01, lambda: tf_publisher.publish(
-            TFMessage(transforms=[transform(101, np.pi / 2, 9)])) if waiting.is_set() else None,
-            callback_group=ReentrantCallbackGroup())
-        return publisher, tf_publisher, timer, waiting, published
+        source = rclpy.create_node('test_tf_source')
+        publisher = source.create_publisher(PoseStamped, '/pose_in', 5)
+        tf_publisher = source.create_publisher(TFMessage, '/tf', 5)
+        return publisher, tf_publisher, source, waiting, published
 
     def test_tf_callbacks_run_while_pose_waits(self):
-        publisher, tf_publisher, timer, waiting, published = self.setup_delayed_tf()
-        executor = MultiThreadedExecutor(num_threads=2)
+        publisher, tf_publisher, source, waiting, published = self.setup_delayed_tf()
+        executor = SingleThreadedExecutor()
         executor.add_node(self.node)
         thread = threading.Thread(target=executor.spin)
         thread.start()
@@ -190,15 +247,17 @@ class SurfaceTargetTests(unittest.TestCase):
                 time.sleep(0.01)
             publisher.publish(observation(100, 500_000_000))
             self.assertTrue(waiting.wait(2))
+            tf_publisher.publish(TFMessage(transforms=[transform(101, np.pi / 2, 9)]))
             self.assertTrue(published.wait(2))
             result = self.node.approach_pub.publish.call_args.args[0]
             expected = Rotation.from_euler('z', np.pi / 4).as_matrix() @ rotation(observation().pose)
             np.testing.assert_allclose(rotation(result.pose)[:, 0], -expected[:, 0], atol=1e-12)
+            self.assert_z_closest_to_up(rotation(result.pose))
             self.assertEqual(result.header.stamp.nanosec, 500_000_000)
         finally:
-            timer.cancel()
             executor.shutdown()
             thread.join(timeout=2)
+            source.destroy_node()
 
 
 if __name__ == '__main__':
