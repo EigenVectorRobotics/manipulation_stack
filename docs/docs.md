@@ -554,6 +554,8 @@ Pose filtering uses a single-threaded executor with a dedicated TF listener thre
 PYTHONPATH=humanoid_arm_skills python humanoid_arm_skills/test/offline_pose_filter.py BAG OUTPUT.json --frame left_ankle_roll_link --alpha 0.2
 ```
 
+`test/save_button_trajectory.py` saves wall-orientation and recorded-orientation variants as JSON and MCAP, preserving original button positions and observation timestamps. `test/replay_button_trajectory.py` streams saved outputs at their recorded intervals with fresh headers into the visual-servo action, recording simulation feedback and results.
+
 ### `noisy_pose_publisher`
 
 Test fixture. Publishes a configurable mean pose with Gaussian noise added to position and orientation. Useful to sanity-check `pose_filtering` without real perception.
