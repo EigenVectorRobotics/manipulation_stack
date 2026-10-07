@@ -1,0 +1,28 @@
+# Move-to-pose node
+
+The node owns goal handling, planning, and trajectory execution while accessing the core exclusively through `g1_pilot.h`. `src/move_to_pose.cpp` starts the node and executor.
+
+## File map
+
+| File | Responsibility |
+|---|---|
+| `server.h` | Declares the node, ROS message aliases, control states, helper methods, and mutex ownership. |
+| `server.cpp` | Creates ROS interfaces and models; handles goals, cancellation, and live targets. |
+| `planning.cpp` | Runs the planning worker, monitors actions, transforms frames, and shares trajectory generation between initial plans and replans. |
+| `control.cpp` | Installs trajectories, generates braking through `Humanoid::brake()`, executes samples, and holds the braking endpoint. |
+
+## Execution
+
+Control follows `Tracking → Braking → Holding → Tracking` when a live target moves. The worker plans from the held endpoint; failed replans retain the hold, and successful replans install the replacement.
+
+## Concurrency
+
+Separate mutexes protect goal ownership, target updates, and control state; `_locked_` helpers require the control mutex. Planning runs without those locks, and separate `Humanoid` instances serve planning and control.
+
+## Goal lifecycle
+
+A newer goal preempts the active goal while control continues during planning. Cancellation clears control commands, and installation checks ownership and cancellation before replacing a trajectory.
+
+## Frames
+
+Goal poses transform into pelvis coordinates for the core; published paths and end-effector poses use `planning_frame`. Target conversion retains the existing latest-TF behavior.

@@ -78,6 +78,8 @@ g1_pilot/g1_pilot/
 │   ├── grav_ff.cpp                # node: grav_ff (gravity feedforward only)
 │   ├── plan_trajecory.cpp         # node: plan_trajecory (PlanJointTrajectory service server)
 │   ├── joint_controller.cpp       # node: joint_controller (ControlJointTrajectory action server)
+│   ├── move_to_pose.cpp           # node entry point
+│   ├── move_to_pose/              # setup, planning, and trajectory control
 │   └── helper_funcs.h             # ROS-side helpers: SE(3) builders, msg conversions, workspace check
 ├── launch/                        # 8 ROS 2 launch files
 ├── config/g1.yaml                 # joint groups, lock profiles, EE frame definitions
@@ -394,6 +396,10 @@ The final leg uses linear interpolation rather than the polynomial generator sin
 ## g1_pilot ROS 2 Nodes
 
 All nodes accept the standard parameters (`asset_file`, `asset_root`, `config_file`, `num_dof`) and load the URDF + `g1.yaml` from `g1_description` / `g1_pilot` package shares.
+
+### `move_to_pose`
+
+The node separates ROS setup and goal handling, planning, and trajectory control into `src/move_to_pose/`. The [file map](g1_pilot/src/move_to_pose.md) describes navigation, execution states, and mutex ownership.
 
 ### `joint_controller` — `ControlJointTrajectory` action server
 

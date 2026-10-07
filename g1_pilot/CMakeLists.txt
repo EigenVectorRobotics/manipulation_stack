@@ -171,7 +171,12 @@ if(ROS2_DEFAULT)
 
     # Action Servers
     add_executable(joint_controller src/joint_controller.cpp)
-    add_executable(move_to_pose src/move_to_pose.cpp)
+    add_executable(move_to_pose
+        src/move_to_pose.cpp
+        src/move_to_pose/server.cpp
+        src/move_to_pose/planning.cpp
+        src/move_to_pose/control.cpp
+    )
 
     target_link_libraries(ik_joint_state_publisher g1_pilot)
     ament_target_dependencies(ik_joint_state_publisher ${ROS2_DEPS})
