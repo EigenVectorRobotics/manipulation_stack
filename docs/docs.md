@@ -502,7 +502,7 @@ The skill sends one `MoveToPose` goal and streams filtered target poses to its `
 
 1. Reset the visual tracker (`/track_3d/reset`); forward `target_description` to the VLM via `keyboard_input_topic` so it can ground the target.
 2. Wait for the first filtered target pose and current EE pose, then send a `MoveToPose` action goal.
-3. Publish each filtered target to the action's `target_topic`. When drift triggers replanning, the motion server clears the trajectory and holds the measured joint positions until a new plan is ready.
+3. Publish each filtered target to the action's `target_topic`. When drift triggers replanning, the motion server holds the current trajectory waypoint with gravity feedforward until a new plan is ready.
 4. Report target distance and tracking loss at 2 Hz. Finish when the motion succeeds, fails, or the visual-servo goal ends.
 
 **Action interface** (`humanoid_manipulation_interfaces/VisualServoingArm`):

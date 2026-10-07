@@ -57,8 +57,6 @@ class VisualServoArmNode(Node):
         self.move_to_pose_cancel_service = self.declare_parameter(
             'move_to_pose_cancel_service',
             self.move_to_pose_action + '/cancel').value
-        self.target_update_topic = self.declare_parameter(
-            'target_update_topic', '~/target_pose').value
 
         # ── Dynamic parameters (read via self.get_parameter(...).value) ──
         self.declare_parameter('lost_timeout', 5.0)
@@ -104,13 +102,6 @@ class VisualServoArmNode(Node):
             5, callback_group=cb_group)
 
         # ── Publishers ──
-        # The goal pose move_to_pose should follow as the target moves. This is
-        # the offset-corrected pose, not the raw filtered one: the arm safety
-        # offset is what makes it a reachable goal rather than the object's
-        # surface, so the raw topic would be the wrong thing to track.
-        self.target_pose_pub = self.create_publisher(
-            PoseStamped, self.target_update_topic, 5)
-
         self.track3d_reset_pub = self.create_publisher(
             Empty, '/track_3d/reset', 5)
         self.keyboard_pub = self.create_publisher(
@@ -223,6 +214,10 @@ class VisualServoArmNode(Node):
                     result.success = False
                     result.message = 'Cancelled'
                     goal_handle.canceled()
+                    self._active_goal_handle = None
+                    self._cancel_motion_goal()
+                    self.last_goal = None
+                    self.last_pose_time = None
                     self._reset_track3d()
                     return result
 
@@ -288,7 +283,7 @@ class VisualServoArmNode(Node):
         goal = MoveToPose.Goal()
         goal.target_pose = target_pose
         goal.left_arm = bool(self._left_arm)
-        goal.target_topic = self.target_pose_pub.topic_name
+        goal.target_topic = self.filtered_pose_upright_topic
 
         self.get_logger().info('Sending move_to_pose goal ...')
         try:
@@ -450,7 +445,6 @@ class VisualServoArmNode(Node):
 
         self.last_pose_time = self.get_clock().now().nanoseconds
         self.last_goal = msg
-        self.target_pose_pub.publish(msg)
 
 
 def main(args=None):

@@ -14,7 +14,7 @@
  * has not drifted, and falls back to a full plan when it is not, so tracking a
  * moving target costs far less than replanning from scratch.
  *
- * A failed replan leaves the arm holding its sampled joint position until
+ * A failed replan leaves the arm holding its current trajectory waypoint until
  * another planning attempt succeeds.
  *
  * Planning and control both use the g1_pilot library directly. Two rules matter:
@@ -443,26 +443,25 @@ private:
         return std::abs(Eigen::AngleAxisd(dR).angle()) >= rot_delta;
     }
 
-    bool make_hold_command_(const JointState & start)
+    bool make_hold_command_()
     {
-        std::unordered_map<std::string, double> positions;
-        for (size_t i = 0; i < start.name.size() && i < start.position.size(); ++i) {
-            positions[start.name[i]] = start.position[i];
+        if (traj_points_.empty() || traj_names_.empty()) return false;
+        const auto & point = traj_points_[std::min(idx_, traj_points_.size() - 1)];
+        if (point.positions.size() != traj_names_.size()) {
+            RCLCPP_ERROR(get_logger(), "Cannot hold: trajectory waypoint has missing joint positions");
+            return false;
         }
 
         hold_command_ = sensor_msgs::msg::JointState();
         hold_command_.name = traj_names_;
-        for (const auto & name : traj_names_) {
-            const auto joint = positions.find(name);
-            if (joint == positions.end()) {
-                RCLCPP_ERROR(get_logger(), "Cannot hold '%s': joint feedback is missing", name.c_str());
-                return false;
-            }
-            hold_command_.position.push_back(joint->second);
-        }
+        hold_command_.position = point.positions;
         hold_command_.velocity.assign(traj_names_.size(), 0.0);
-        hold_command_.effort.assign(traj_names_.size(), 0.0);
-        return !hold_command_.name.empty();
+
+        auto stationary = point;
+        stationary.velocities = hold_command_.velocity;
+        stationary.accelerations.assign(traj_names_.size(), 0.0);
+        hold_command_.effort = feedforward_torque_(stationary);
+        return true;
     }
 
     bool stop_for_replan_(const std::shared_ptr<GoalHandle> & goal, JointState & start)
@@ -473,7 +472,7 @@ private:
         if (start.name.empty()) return false;
         start.velocity.assign(start.name.size(), 0.0);
         if (holding_) return true;
-        if (!make_hold_command_(start)) return false;
+        if (!make_hold_command_()) return false;
 
         traj_points_.clear();
         idx_ = 0;
@@ -486,7 +485,7 @@ private:
         empty_path.header.frame_id = frame_;
         empty_path.header.stamp = hold_command_.header.stamp;
         path_pub_->publish(empty_path);
-        RCLCPP_INFO(get_logger(), "Trajectory cleared; holding current joints during replan");
+        RCLCPP_INFO(get_logger(), "Trajectory cleared; holding current waypoint during replan");
         return true;
     }
 
