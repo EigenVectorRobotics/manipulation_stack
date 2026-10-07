@@ -11,8 +11,7 @@ Send a different target without editing anything:
     ros2 launch g1_pilot move_to_pose_sim.launch.py target:="[0.4, -0.4, 0.2]"
     ros2 launch g1_pilot move_to_pose_sim.launch.py send_goal:=false
 
-Pass target_topic:=/some/pose to have move_to_pose follow a moving target. It
-stores the latest pose today; nothing replans off it yet.
+Pass target_topic:=/some/pose to have move_to_pose replan as the target moves.
 """
 
 import ast

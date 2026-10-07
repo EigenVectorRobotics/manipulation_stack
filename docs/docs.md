@@ -496,19 +496,14 @@ All launch files expose namespace, topic remap, and `PublishTF` (toggle to inclu
 
 ### `humanoid_arm_vs` — `VisualServoingArm` action server
 
-Drives the arm to a perceived target (a tracked surface normal) by **dynamically re-planning** as the target moves or as tracking error sustains.
+The skill sends one `MoveToPose` goal and streams filtered target poses to its `target_topic`. `move_to_pose` replans the active trajectory when that target moves.
 
 **Pipeline per goal:**
 
 1. Reset the visual tracker (`/track_3d/reset`); forward `target_description` to the VLM via `keyboard_input_topic` so it can ground the target.
-2. Wait for the first filtered target pose + current EE pose, then call the `PlanJointTrajectory` service.
-3. Send the returned trajectory to the `ControlJointTrajectory` action.
-4. In the main loop (default 2 Hz), monitor:
-   - Goal-pose drift (position Δ ≥ `replan_goal_position_delta`, orientation Δ ≥ `replan_goal_orientation_delta_deg`) → trigger replan.
-   - (No error-based replan trigger: the controller advances on elapsed time, so its `current_error` is tracking lag rather than a stuck-arm signal.)
-   - Tracking lost → report in feedback.
-   - Goal succeeded / cancelled / timed out → terminate.
-5. Replans are gated by a `ReplanPolicyChain` (no active goal, EE/target unavailable, EE within `replan_skip_distance`, post-goal cooldown, replan cooldown, replan in progress).
+2. Wait for the first filtered target pose and current EE pose, then send a `MoveToPose` action goal.
+3. Publish each filtered target to the action's `target_topic`. When drift triggers replanning, the motion server clears the trajectory and holds the measured joint positions until a new plan is ready.
+4. Report target distance and tracking loss at 2 Hz. Finish when the motion succeeds, fails, or the visual-servo goal ends.
 
 **Action interface** (`humanoid_manipulation_interfaces/VisualServoingArm`):
 
@@ -522,14 +517,10 @@ Drives the arm to a perceived target (a tracked surface normal) by **dynamically
 |-----------|---------|---------|
 | `goal_rate` | 2.0 Hz | Main loop rate. |
 | `action_timeout` | 600 s | Per-goal timeout. |
-| `replan_cooldown` | 5.0 s | Minimum gap between replans. |
-| `replan_skip_distance` | 0.12 m | Don't replan when EE is closer than this. |
-| `replan_goal_position_delta` | 0.01 m | Position drift to trigger replan. |
-| `replan_goal_orientation_delta_deg` | 15° | Orientation drift to trigger replan. |
 | `post_goal_cooldown` | 1.0 s | Cooldown after a successful goal. |
 | `arm_safety_distance_{x,y,z}` | (-0.01, 0.0, 0.0) m | Local-frame offset applied to the target before planning. |
 
-Threading: a `ReentrantCallbackGroup` allows overlapping subscriber/timer callbacks; three locks (`_replan_lock`, `_control_lock`, `_trajectory_lock`) guard internal state.
+The skill uses a `ReentrantCallbackGroup` for callbacks and a motion lock for goal state. `move_to_pose` owns trajectory replanning.
 
 ### `pose_filtering`
 
@@ -609,7 +600,7 @@ The library used to hard-code which joints to freeze. It now reads `g1.yaml`, wh
 
 - Produces collision-free joint trajectories rather than collision-blind SE(3) interpolations.
 - Naturally handles joint limits and self-collisions through OMPL's validity checker (`HumanoidIK::check_collision`).
-- Costs more per call (≤ 1 s solve budget by default) but is amortised by the skill layer's 5 s replan cooldown.
+- Costs more per call (≤ 1 s solve budget by default); `move_to_pose` limits replanning with target drift thresholds and a minimum interval.
 
 `VisualServoPlanner` keeps RRT* for the bulk approach and switches to a short linear final leg, so the contact-axis approach direction is preserved.
 

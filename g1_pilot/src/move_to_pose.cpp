@@ -14,8 +14,8 @@
  * has not drifted, and falls back to a full plan when it is not, so tracking a
  * moving target costs far less than replanning from scratch.
  *
- * A failed replan is not a failed goal: the trajectory already running stays,
- * and the next update tries again.
+ * A failed replan leaves the arm holding its sampled joint position until
+ * another planning attempt succeeds.
  *
  * Planning and control both use the g1_pilot library directly. Two rules matter:
  *
@@ -202,10 +202,12 @@ private:
 
     std::vector<std::string> traj_names_;
     std::vector<trajectory_msgs::msg::JointTrajectoryPoint> traj_points_;
+    sensor_msgs::msg::JointState hold_command_;
     size_t idx_ = 0;
     rclcpp::Time traj_start_;
     double error_ = 0.0;
     bool tracking_ = false;
+    bool holding_ = false;
     Eigen::MatrixXd planned_for_;       // goal pose the live trajectory serves
     bool have_planned_for_ = false;
 
@@ -378,6 +380,8 @@ private:
         traj_points_.clear();
         idx_ = 0;
         tracking_ = false;
+        holding_ = false;
+        hold_command_ = sensor_msgs::msg::JointState();
     }
 
     // ══════════════════ Worker: plan, install, monitor ══════════════════
@@ -412,6 +416,8 @@ private:
             traj_points_.clear();
             idx_ = 0;
             tracking_ = false;
+            holding_ = false;
+            hold_command_ = sensor_msgs::msg::JointState();
             return Install::Cancelled;
         }
         traj_names_ = traj.joint_names;
@@ -419,6 +425,8 @@ private:
         idx_ = 0;
         traj_start_ = get_clock()->now();
         tracking_ = true;
+        holding_ = false;
+        hold_command_ = sensor_msgs::msg::JointState();
         planned_for_ = planned_for;
         have_planned_for_ = true;
         return Install::Ok;
@@ -433,6 +441,53 @@ private:
         const Eigen::Matrix3d dR =
             a.block<3, 3>(0, 0).transpose() * b.block<3, 3>(0, 0);
         return std::abs(Eigen::AngleAxisd(dR).angle()) >= rot_delta;
+    }
+
+    bool make_hold_command_(const JointState & start)
+    {
+        std::unordered_map<std::string, double> positions;
+        for (size_t i = 0; i < start.name.size() && i < start.position.size(); ++i) {
+            positions[start.name[i]] = start.position[i];
+        }
+
+        hold_command_ = sensor_msgs::msg::JointState();
+        hold_command_.name = traj_names_;
+        for (const auto & name : traj_names_) {
+            const auto joint = positions.find(name);
+            if (joint == positions.end()) {
+                RCLCPP_ERROR(get_logger(), "Cannot hold '%s': joint feedback is missing", name.c_str());
+                return false;
+            }
+            hold_command_.position.push_back(joint->second);
+        }
+        hold_command_.velocity.assign(traj_names_.size(), 0.0);
+        hold_command_.effort.assign(traj_names_.size(), 0.0);
+        return !hold_command_.name.empty();
+    }
+
+    bool stop_for_replan_(const std::shared_ptr<GoalHandle> & goal, JointState & start)
+    {
+        std::scoped_lock lock(goal_mutex_, ctrl_mutex_);
+        if (active_ != goal || cancel_requested_ || goal->is_canceling()) return false;
+        start = state_;
+        if (start.name.empty()) return false;
+        start.velocity.assign(start.name.size(), 0.0);
+        if (holding_) return true;
+        if (!make_hold_command_(start)) return false;
+
+        traj_points_.clear();
+        idx_ = 0;
+        tracking_ = false;
+        holding_ = true;
+        hold_command_.header.stamp = get_clock()->now();
+        command_pub_->publish(hold_command_);
+
+        nav_msgs::msg::Path empty_path;
+        empty_path.header.frame_id = frame_;
+        empty_path.header.stamp = hold_command_.header.stamp;
+        path_pub_->publish(empty_path);
+        RCLCPP_INFO(get_logger(), "Trajectory cleared; holding current joints during replan");
+        return true;
     }
 
     void run_(const std::shared_ptr<GoalHandle> & goal)
@@ -513,13 +568,6 @@ private:
         monitor_(goal);
     }
 
-    /** Replan toward the latest pose on the target topic, if it has moved far
-     *  enough since the trajectory now running was planned.
-     *
-     *  Deliberately forgiving: any reason not to replan leaves the current
-     *  trajectory alone and returns. A target that stops publishing, a TF that
-     *  drops out, or a planner that fails on one update must not disturb a
-     *  motion that is already valid. */
     void try_replan_(const std::shared_ptr<GoalHandle> & goal)
     {
         geometry_msgs::msg::PoseStamped update;
@@ -549,11 +597,7 @@ private:
         }
 
         JointState start;
-        {
-            std::lock_guard<std::mutex> lock(ctrl_mutex_);
-            start = state_;
-        }
-        if (start.name.empty()) return;
+        if (!stop_for_replan_(goal, start)) return;
 
         const bool left = goal->get_goal()->left_arm;
         trajectory_msgs::msg::JointTrajectory traj;
@@ -569,7 +613,7 @@ private:
             const std::vector<Eigen::VectorXd> configs = toJointConfigs(planned);
             if (configs.empty()) {
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                                     "Replan produced no trajectory; keeping the current one");
+                                     "Replan produced no trajectory; holding position");
                 last_replan_ = now;     // back off rather than retry every pass
                 return;
             }
@@ -579,14 +623,17 @@ private:
             }
             traj = convertToTrajectory(planned, frame_, get_clock()->now());
         } catch (const std::exception & e) {
-            RCLCPP_WARN(get_logger(), "Replan threw: %s; keeping the current trajectory",
+            RCLCPP_WARN(get_logger(), "Replan threw: %s; holding position",
                         e.what());
             last_replan_ = now;
             return;
         }
 
         last_replan_ = now;
-        if (traj.points.empty()) return;
+        if (traj.points.empty()) {
+            RCLCPP_WARN(get_logger(), "Replan produced no waypoints; holding position");
+            return;
+        }
 
         // Preempted or cancelled mid-replan: drop the new trajectory and let
         // the monitor's next pass terminate the goal.
@@ -626,12 +673,24 @@ private:
                 return;
             }
 
+            try_replan_(goal);
+            {
+                std::lock_guard<std::mutex> lock(goal_mutex_);
+                if (active_ != goal || cancel_requested_ || goal->is_canceling()) continue;
+            }
+
             // ── Progress (control state only) ──
             bool done = false;
             double final_error = 0.0;
             {
                 std::lock_guard<std::mutex> lock(ctrl_mutex_);
-                if (traj_points_.empty()) {
+                if (holding_) {
+                    error_ = joint_error_(hold_command_.position);
+                    feedback->tracking = false;
+                    feedback->current_error = error_;
+                    feedback->total_waypoints = 0;
+                    feedback->waypoints_remaining = 0;
+                } else if (traj_points_.empty()) {
                     // An empty buffer must never read as "ran to completion".
                     ended = "Trajectory cleared";
                 } else if (idx_ >= traj_points_.size()) {
@@ -658,12 +717,6 @@ private:
             }
 
             goal->publish_feedback(feedback);
-
-            // Track the moving target, if this goal named one. Runs on the
-            // worker thread, which is the only thread allowed to touch
-            // planner_, and holds no lock while planning, so the control loop
-            // keeps driving the current trajectory throughout.
-            try_replan_(goal);
 
             std::unique_lock<std::mutex> lock(goal_mutex_);
             cv_.wait_for(lock, period);
@@ -768,6 +821,12 @@ private:
             right_ee_pub_->publish(convertToPoseStamped(
                 transform * controller_model_->get_current_right_ee_pose(),
                 frame_, get_clock()->now()));
+        }
+
+        if (holding_) {
+            hold_command_.header.stamp = get_clock()->now();
+            command_pub_->publish(hold_command_);
+            return;
         }
 
         // No trajectory means no commands. This is what cancelling relies on.

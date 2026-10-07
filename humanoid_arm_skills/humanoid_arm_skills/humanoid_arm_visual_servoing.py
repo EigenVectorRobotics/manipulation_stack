@@ -4,10 +4,8 @@ Visual servoing action server for arm manipulation.
 Accepts a text description of a target and a left/right arm selector,
 and performs visual servoing to guide the arm toward the target.
 
-Uses dynamic replanning: an initial motion goal is sent, then a newer goal is
-sent whenever the tracked target moves far enough. Planning and trajectory
-tracking both live behind the move_to_pose action, so a newer goal preempts the
-old one inside that server and the arm stays commanded across planning latency.
+Sends one move_to_pose goal and streams updated target poses to that action.
+The move_to_pose server replans while the goal runs.
 """
 
 import time
@@ -29,14 +27,9 @@ from humanoid_manipulation_interfaces.action import MoveToPose
 
 from humanoid_arm_skills.utils import pose_distance
 from humanoid_arm_skills.replan_policies import (
-    EECloseToGoal,
-    EEPoseUnavailable,
     InPostGoalCooldown,
-    InReplanCooldown,
-    NoActiveGoal,
     ReplanContext,
     ReplanPolicyChain,
-    TargetPoseUnavailable,
 )
 
 
@@ -71,10 +64,6 @@ class VisualServoArmNode(Node):
         self.declare_parameter('lost_timeout', 5.0)
         self.declare_parameter('goal_rate', 2.0)
         self.declare_parameter('action_timeout', 600.0)
-        self.declare_parameter('replan_cooldown', 5.0)
-        self.declare_parameter('replan_goal_position_delta', 0.01)
-        self.declare_parameter('replan_goal_orientation_delta_deg', 15.0)
-        self.declare_parameter('replan_skip_distance', 0.12)
         self.declare_parameter('post_goal_cooldown', 1.0)
         self.declare_parameter('arm_safety_distance_x', -0.01)
         self.declare_parameter('arm_safety_distance_y', 0.0)
@@ -91,23 +80,10 @@ class VisualServoArmNode(Node):
         self._left_arm = False
         self._goal_completed_time = 0.0  # monotonic time of last goal success
 
-        # ── Thread-safe replan state ──
-        self._replan_lock = threading.Lock()
-        self._last_replan_time = 0.0
-        self._last_planned_goal = None      # PoseStamped sent in the last goal
-
         # ── Thread-safe motion state ──
         self._motion_lock = threading.Lock()
         self._motion_goal_handle = None
-        # Motions are numbered so that acceptances arriving out of order cannot
-        # leave _motion_goal_handle pointing at an already-superseded goal —
-        # cancelling that one would target a dead goal and let the live one run.
-        self._motion_seq = 0
-        self._motion_accepted_seq = -1
-        # Bumped on every VS goal. A MoveToPose acceptance that lands after its
-        # VS goal ended is cancelled on arrival rather than left commanding the
-        # arm, which is the failure the old two-client split could not close:
-        # a plan service call already in flight could not be cancelled.
+        self._motion_failure = None
         self._motion_generation = 0
 
         # ── Subscribers ──
@@ -141,8 +117,6 @@ class VisualServoArmNode(Node):
             String, self.keyboard_input_topic, 5)
 
         # ── Action client ──
-        # move_to_pose owns the plan -> track handover and its preemption, so
-        # replanning here is just "send a newer goal".
         self._move_client = ActionClient(
             self, MoveToPose, self.move_to_pose_action,
             callback_group=cb_group)
@@ -164,25 +138,13 @@ class VisualServoArmNode(Node):
             callback_group=cb_group,
         )
 
-        # \u2500\u2500 Policy chains \u2500\u2500
-        self._replan_chain = ReplanPolicyChain([
-            NoActiveGoal(),
-            EEPoseUnavailable(),
-            TargetPoseUnavailable(),
-            EECloseToGoal(),
-            InPostGoalCooldown(),
-            InReplanCooldown(),
-        ])
-        # Acceptance runs before any target for this goal has arrived, so it
-        # can only use time-based state. EECloseToGoal belongs to the replan
-        # chain, where last_goal is current.
         self._goal_acceptance_chain = ReplanPolicyChain([
             InPostGoalCooldown(),
         ])
 
         self.get_logger().info(
             '\033[32m\033[1m\u2714\033[0m humanoid_arm_visual_servoing: ready '
-            '(action server, dynamic replanning)')
+            '(action server, target streaming)')
 
     # ── Action callbacks ──
 
@@ -215,14 +177,11 @@ class VisualServoArmNode(Node):
         self.last_goal = None
         self.is_tracking = False
         self._controller_succeeded = False
-        with self._replan_lock:
-            self._last_replan_time = 0.0
-            self._last_planned_goal = None
         with self._motion_lock:
             # Retires any motion still in flight from a previous VS goal.
             self._motion_generation += 1
-            self._motion_accepted_seq = -1
             self._motion_goal_handle = None
+            self._motion_failure = None
 
         # Reset track3d then initialise with VLM query
         self._reset_track3d()
@@ -233,19 +192,18 @@ class VisualServoArmNode(Node):
         result = VisualServoing.Result()
         feedback = VisualServoing.Feedback()
 
-        initial_plan_sent = False
+        motion_goal_sent = False
         rate = self.create_rate(self.get_parameter('goal_rate').value)
 
         try:
             while rclpy.ok():
-                # ── Trigger initial plan once poses are available ──
-                if not initial_plan_sent:
+                # ── Start motion once poses are available ──
+                if not motion_goal_sent:
                     ee_pose = (self.left_ee_pose if self._left_arm
                                else self.right_ee_pose)
                     if self.last_goal is not None and ee_pose is not None:
-                        self.get_logger().info('Triggering initial plan')
-                        self._request_replan()
-                        initial_plan_sent = True
+                        self.get_logger().info('Sending initial motion goal')
+                        motion_goal_sent = self._send_motion_goal()
 
                 # ── Controller succeeded ──
                 if self._controller_succeeded:
@@ -266,6 +224,15 @@ class VisualServoArmNode(Node):
                     result.message = 'Cancelled'
                     goal_handle.canceled()
                     self._reset_track3d()
+                    return result
+
+                with self._motion_lock:
+                    motion_failure = self._motion_failure
+                if motion_failure is not None:
+                    result.success = False
+                    result.message = motion_failure
+                    self._fill_result(result, self._left_arm)
+                    goal_handle.abort()
                     return result
 
                 elapsed = (self.get_clock().now().nanoseconds
@@ -302,76 +269,56 @@ class VisualServoArmNode(Node):
                 rate.sleep()
 
         finally:
-            # Order matters. Clearing the handle first makes the NoActiveGoal
-            # policy reject any further replan, and marks a goal acceptance
-            # still in flight as stale. Cancelling first left a window in which
-            # the pose callback could fire one more motion goal on the way out,
-            # and the arm kept moving after the action had returned.
             self._active_goal_handle = None
             self._cancel_motion_goal()
             self.last_goal = None
             self.last_pose_time = None
-            self._last_planned_goal = None
 
-    # ── Dynamic replanning ──
+    # ── Initial motion ──
 
-    def _request_replan(self):
-        """Send a new move_to_pose goal. Thread-safe, non-blocking.
-
-        Gated on goal change: only sends if the current goal has moved by at
-        least `replan_goal_position_delta` metres or rotated by
-        `replan_goal_orientation_delta_deg` degrees since the last one, and
-        skipped if the arm is already within `replan_skip_distance`.
-
-        No "already in progress" gate: a newer goal preempts the older one
-        inside move_to_pose, which is strictly better than dropping it. The old
-        trajectory keeps executing there until the new plan is ready, so the arm
-        is never left uncommanded while planning.
-        """
-        ctx = ReplanContext(node=self, now=time.monotonic())
-        if self._replan_chain.should_skip(ctx, self.get_logger()):
-            return
-
+    def _send_motion_goal(self):
         target_pose = self.last_goal
-
         if not self._move_client.server_is_ready():
             self.get_logger().warn('move_to_pose action server not available')
-            return
+            return False
 
-        with self._replan_lock:
-            self._last_planned_goal = target_pose
-            # Timed from the request, not the response: a lost or slow response
-            # must not leave the cooldown permanently unarmed.
-            self._last_replan_time = time.monotonic()
         with self._motion_lock:
             generation = self._motion_generation
-            self._motion_seq += 1
-            seq = self._motion_seq
 
         goal = MoveToPose.Goal()
         goal.target_pose = target_pose
         goal.left_arm = bool(self._left_arm)
-        # Where move_to_pose can follow this target as it moves. Stored there
-        # for now; replanning still happens by sending a newer goal from here.
         goal.target_topic = self.target_pose_pub.topic_name
 
         self.get_logger().info('Sending move_to_pose goal ...')
-        send_future = self._move_client.send_goal_async(
-            goal, feedback_callback=self._move_feedback_cb)
-        send_future.add_done_callback(
-            lambda fut: self._move_goal_response_cb(fut, generation, seq))
+        try:
+            send_future = self._move_client.send_goal_async(
+                goal, feedback_callback=self._move_feedback_cb)
+            send_future.add_done_callback(
+                lambda fut: self._move_goal_response_cb(fut, generation))
+        except Exception as exc:
+            with self._motion_lock:
+                if generation == self._motion_generation:
+                    self._motion_failure = f'move_to_pose send failed: {exc}'
+        return True
 
     # ── MoveToPose action client ──
 
-    def _move_goal_response_cb(self, future, generation, seq):
+    def _move_goal_response_cb(self, future, generation):
         try:
             goal_handle = future.result()
         except Exception as exc:
             self.get_logger().warn(f'move_to_pose send failed: {exc}')
+            with self._motion_lock:
+                if generation == self._motion_generation:
+                    self._motion_failure = f'move_to_pose send failed: {exc}'
             return
 
         if not goal_handle.accepted:
             self.get_logger().warn('move_to_pose goal rejected')
+            with self._motion_lock:
+                if generation == self._motion_generation:
+                    self._motion_failure = 'move_to_pose goal rejected'
             return
 
         # The VS goal this motion belonged to may have finished while the
@@ -379,8 +326,7 @@ class VisualServoArmNode(Node):
         with self._motion_lock:
             stale = (generation != self._motion_generation
                      or self._active_goal_handle is None)
-            if not stale and seq > self._motion_accepted_seq:
-                self._motion_accepted_seq = seq
+            if not stale:
                 self._motion_goal_handle = goal_handle
 
         if stale:
@@ -397,13 +343,6 @@ class VisualServoArmNode(Node):
             lambda fut: self._move_result_cb(fut, generation))
 
     def _move_feedback_cb(self, feedback_msg):
-        """Log motion progress.
-
-        Purely diagnostic: replanning is driven by target motion, not by this
-        error (see ``_filtered_pose_cb``). The controller advances waypoints on
-        elapsed time, so ``current_error`` is tracking lag rather than evidence
-        of a stuck arm.
-        """
         fb = feedback_msg.feedback
         dist, _ = self._compute_errors(self._left_arm)
 
@@ -418,19 +357,23 @@ class VisualServoArmNode(Node):
             result = future.result().result
         except Exception as exc:
             self.get_logger().warn(f'move_to_pose result error: {exc}')
+            with self._motion_lock:
+                if generation == self._motion_generation:
+                    self._motion_failure = f'move_to_pose result error: {exc}'
             return
 
         with self._motion_lock:
             if generation != self._motion_generation:
                 return
+            if result.success:
+                self._controller_succeeded = True
+            else:
+                self._motion_failure = result.message or 'move_to_pose failed'
 
         if result.success:
             self.get_logger().info(
                 f'move_to_pose succeeded (final_error={result.final_error:.4f})')
-            self._controller_succeeded = True
         else:
-            # Preemption and cancellation are routine here: every replan
-            # supersedes the goal before it.
             self.get_logger().info(f'move_to_pose ended: {result.message}')
 
     def _cancel_motion_goal(self):
@@ -445,7 +388,6 @@ class VisualServoArmNode(Node):
         """
         with self._motion_lock:
             self._motion_generation += 1
-            self._motion_accepted_seq = -1
             handle = self._motion_goal_handle
             self._motion_goal_handle = None
 
@@ -509,39 +451,6 @@ class VisualServoArmNode(Node):
         self.last_pose_time = self.get_clock().now().nanoseconds
         self.last_goal = msg
         self.target_pose_pub.publish(msg)
-
-        if self._active_goal_handle is None:
-            return
-
-        # First plan: replan immediately without comparison logging.
-        if self._last_planned_goal is None:
-            return
-
-        dp, d_ori_deg = pose_distance(
-            msg.pose, self._last_planned_goal.pose)
-        pos_delta = self.get_parameter(
-            'replan_goal_position_delta').value
-        ori_delta_deg = self.get_parameter(
-            'replan_goal_orientation_delta_deg').value
-
-        # Skip if the goal hasn't moved/rotated enough since the last plan.
-        if dp < pos_delta and d_ori_deg < ori_delta_deg:
-            self.get_logger().debug(
-                f'Replan skipped — goal nearly unchanged: '
-                f'dp={dp:.4f}m (< {pos_delta}m), '
-                f'dθ={d_ori_deg:.2f}° (< {ori_delta_deg}°)',
-                throttle_duration_sec=5.0)
-            return
-
-        triggers = []
-        if dp >= pos_delta:
-            triggers.append(f'dp={dp:.4f}m (>= {pos_delta}m)')
-        if d_ori_deg >= ori_delta_deg:
-            triggers.append(f'dθ={d_ori_deg:.2f}° (>= {ori_delta_deg}°)')
-
-        self.get_logger().info(
-            f'Goal updated — requesting replan ({", ".join(triggers)})')
-        self._request_replan()
 
 
 def main(args=None):
