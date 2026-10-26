@@ -26,6 +26,7 @@ struct Humanoid::Impl {
     pinocchio::GeometryModel geom;
 
     pinocchio::Data data;
+    pinocchio::Data data_full;
 
     std::mutex data_mutex;
 
@@ -49,6 +50,7 @@ struct Humanoid::Impl {
 
     void initialize(){
         data = pinocchio::Data(model);
+        data_full = pinocchio::Data(model_full);
         ik = std::make_shared<HumanoidIK>(model, geom, collision_margin);
         // controller = std::make_unique<IKTrajTracker>(model, ik);
         controller = std::make_unique<ImpedanceController>(model);
@@ -431,6 +433,28 @@ Eigen::MatrixXd Humanoid::forward_kinematics(
     return left
     ? impl_->data.oMf[impl_->model.getFrameId("L_ee")].toHomogeneousMatrix()
     : impl_->data.oMf[impl_->model.getFrameId("R_ee")].toHomogeneousMatrix();
+}
+
+Eigen::Matrix4d Humanoid::frame_transform(
+    const JointState& state,
+    const std::string& base_frame,
+    const std::string& tip_frame
+){
+    std::lock_guard<std::mutex> lock(impl_->data_mutex);
+    const auto& model = impl_->model_full;
+    if (!model.existFrame(base_frame) || !model.existFrame(tip_frame)) {
+        throw std::invalid_argument("Humanoid::frame_transform: unknown frame " + base_frame + " or " + tip_frame);
+    }
+
+    JointState padded = state;
+    padded.velocity.resize(padded.name.size(), 0.0);
+    padded.effort.resize(padded.name.size(), 0.0);
+    const Eigen::VectorXd q = std::get<0>(jointstate_to_vectors(padded, model));
+
+    pinocchio::framesForwardKinematics(model, impl_->data_full, q);
+    const auto& oMb = impl_->data_full.oMf[model.getFrameId(base_frame)];
+    const auto& oMt = impl_->data_full.oMf[model.getFrameId(tip_frame)];
+    return oMb.actInv(oMt).toHomogeneousMatrix();
 }
 
 void Humanoid::setLeftArm(bool left_arm) { impl_->motion_planner->setLeftArm(left_arm); }
