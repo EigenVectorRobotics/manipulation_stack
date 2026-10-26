@@ -71,9 +71,7 @@ joint_categories:
     - left_dex1_finger_joint_1
     - left_dex1_finger_joint_2
 
-  right_gripper:
-    - right_dex1_finger_joint_1
-    - right_dex1_finger_joint_2
+  right_gripper: []
 
 # Named profiles. Each profile defines:
 #   - lock_categories: which joint categories are held fixed.
