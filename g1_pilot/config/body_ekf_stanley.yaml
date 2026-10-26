@@ -1,0 +1,44 @@
+# Two-body attitude EKF for Stanley (body_ekf node).
+body_ekf:
+  ros__parameters:
+    robot_name: stanley
+
+    # Inputs: sensor_msgs/JointState (URDF joint names) and sensor_msgs/Imu; pelvis / torso IMU axes = link axes
+    joint_states_topic: /feedback
+    pelvis_imu_topic: /pelvis_imu
+    torso_imu_topic: /torso_imu
+    camera_imu_topic: /camera/camera/imu
+    use_camera_imu: false          # true: blend the camera gyro and fuse its gravity (needs the camera TF)
+    use_header_stamps: true
+
+    # Outputs: TF fixed_frame -> tf_root_frame (root of the live robot TF tree) and the torso pose
+    fixed_frame: foot_world
+    tf_root_frame: sensor
+    publish_tf: true
+    tf_decimation: 1               # 1: every 200 Hz grid step
+    torso_pose_topic: /body_ekf/torso_pose
+    pose_publish_decimation: 4
+
+    # Camera driver frames (camera internals come from /tf_static)
+    camera_link_frame: camera_link
+    camera_imu_frame: camera_imu_optical_frame
+
+    # Camera mount: torso_link -> camera_link, from d435_joint in g1_29dof_with_hand_rev_1_0_ros.urdf
+    camera_mount_xyz: [0.081099, 0.023467, 0.414921]
+    camera_mount_rpy_deg: [-0.326357, 18.371376, -1.592364]
+
+    # Encoder offsets are applied in unitree_interface (config/stanley.yaml), so /feedback is already corrected
+
+    # EKF noise (shared tuning)
+    sig_acc_deg: 3.0
+    sig_waist_deg: 10.0
+    sig_leg_tilt_deg: 1.0
+    sig_leg_yaw_deg: 1.0
+    sig_bias_walk: 1.0e-5
+    gyro_density_pelvis: 0.0       # <= 0: measured on the startup still period
+    gyro_density_torso: 0.0
+    gyro_density_sensor: 0.0
+
+    # Startup still period
+    calibration_duration: 2.0
+    still_threshold: 0.3

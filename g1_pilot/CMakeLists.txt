@@ -50,6 +50,7 @@ add_library(g1_pilot
     src/core/arm_mp/motion_planner.cpp
     src/core/arm_mp/joint_space_planner.cpp
     src/core/arm_mp/visual_servo_planner.cpp
+    src/core/body_ekf/body_ekf.cpp
 )
 
 target_compile_definitions(g1_pilot PUBLIC COAL_DISABLE_HPP_FCL_WARNINGS)
@@ -100,6 +101,17 @@ if(BUILD_TESTING)
         G1_ASSET_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../g1_description/assets/g1/"
         G1_CONFIG_FILE="${CMAKE_CURRENT_SOURCE_DIR}/config/g1.yaml")
 
+    add_executable(test_body_ekf test/body_ekf/test_body_ekf.cpp)
+    target_include_directories(test_body_ekf PRIVATE src)
+    target_link_libraries(test_body_ekf PRIVATE g1_pilot GTest::gtest_main)
+    target_compile_definitions(test_body_ekf PRIVATE
+        G1_ASSET_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../g1_description/assets/g1/"
+        G1_CONFIG_FILE="${CMAKE_CURRENT_SOURCE_DIR}/config/g1.yaml")
+
+    add_executable(body_ekf_replay test/body_ekf/replay_body_ekf.cpp)
+    target_include_directories(body_ekf_replay PRIVATE src)
+    target_link_libraries(body_ekf_replay PRIVATE g1_pilot)
+
     # add_executable(math_unittest test/arm_mp/math_unittest.cpp)
     # add_executable(line_unittest test/arm_mp/line_unittest.cpp)
     # target_link_libraries(math_unittest PRIVATE arm_mp GTest::GTest GTest::Main pthread)
@@ -113,6 +125,7 @@ if(BUILD_TESTING)
         # gtest_discover_tests(math_unittest WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)
         # gtest_discover_tests(line_unittest WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)
         gtest_discover_tests(test_mp_ik WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)
+        gtest_discover_tests(test_body_ekf)
     endif()
 
 
@@ -165,6 +178,8 @@ if(ROS2_DEFAULT)
     add_executable(joint_traj_publisher src/joint_traj_publisher.cpp)
     add_executable(visual_servo src/visual_servo.cpp)
     add_executable(grav_ff src/grav_ff.cpp)
+    add_executable(body_ekf src/body_ekf.cpp)
+    target_include_directories(body_ekf PRIVATE src)
 
     # Service Servers
     add_executable(plan_trajecory src/plan_trajecory.cpp)
@@ -193,6 +208,9 @@ if(ROS2_DEFAULT)
     target_link_libraries(grav_ff g1_pilot)
     ament_target_dependencies(grav_ff ${ROS2_DEPS})
 
+    target_link_libraries(body_ekf g1_pilot)
+    ament_target_dependencies(body_ekf ${ROS2_DEPS})
+
     target_link_libraries(joint_controller g1_pilot)
     ament_target_dependencies(joint_controller ${ROS2_DEPS})
 
@@ -208,6 +226,7 @@ if(ROS2_DEFAULT)
         joint_traj_publisher
         visual_servo
         grav_ff
+        body_ekf
         plan_trajecory
         joint_controller
         move_to_pose
