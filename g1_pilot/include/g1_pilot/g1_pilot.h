@@ -179,6 +179,17 @@ public:
         const bool left = false
     );
 
+    /**
+     * @brief base <- tip transform between two frames of the full model,
+     * including the legs and waist that the reduced arm model locks.
+     * Joints missing from state are held at zero.
+     */
+    Eigen::Matrix4d frame_transform(
+        const JointState& state,
+        const std::string& base_frame,
+        const std::string& tip_frame
+    );
+
     void setLeftArm(bool left_arm);
 
 protected:
