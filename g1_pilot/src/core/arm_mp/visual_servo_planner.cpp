@@ -324,7 +324,7 @@ VisualServoPlanner::replanTrajectory(
 
     std::vector<Eigen::VectorXd> joints;
     joints.reserve(last_search_.size() - rejoin_index + 1);
-    if (start_drift > REJOIN_EPS) joints.push_back(rejoin_q);
+    if ((rejoin_q - last_search_[rejoin_index]).norm() > REJOIN_EPS) joints.push_back(rejoin_q);
     for (std::size_t i = rejoin_index; i < last_search_.size(); ++i) {
         joints.push_back(last_search_[i]);
     }
