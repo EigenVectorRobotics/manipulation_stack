@@ -17,6 +17,22 @@ def generate_launch_description():
                               description='TF frame to transform normal pose into'),
         DeclareLaunchArgument('filter_alpha', default_value='0.2',
                               description='EMA new-observation weight in (0, 1]'),
+        DeclareLaunchArgument('filter_type', default_value='kalman',
+                              description='Target filter: ema or kalman'),
+        DeclareLaunchArgument('kf_q_pos', default_value='0.003',
+                              description='Kalman target random walk (m/sqrt(s))'),
+        DeclareLaunchArgument('kf_sig_lat', default_value='0.004',
+                              description='Kalman lateral camera noise (m)'),
+        DeclareLaunchArgument('kf_sig_depth', default_value='0.015',
+                              description='Kalman depth camera noise along the ray (m)'),
+        DeclareLaunchArgument('kf_sig_kin', default_value='0.002',
+                              description='Kalman isotropic kinematic noise (m)'),
+        DeclareLaunchArgument('kf_q_ang_deg', default_value='0.5',
+                              description='Kalman normal random walk (deg/sqrt(s))'),
+        DeclareLaunchArgument('kf_sig_ang_deg', default_value='3.0',
+                              description='Kalman normal measurement noise (deg)'),
+        DeclareLaunchArgument('kf_gate', default_value='16.27',
+                              description='Kalman NIS outlier gate (chi2 3 DoF)'),
 
         # humanoid_arm_visual_servoing
         DeclareLaunchArgument('keyboard_input_topic',
@@ -83,6 +99,10 @@ def generate_launch_description():
             'msg_type':     'PoseStamped',
             'target_frame_arm': LaunchConfiguration('target_frame_arm'),
             'alpha': LaunchConfiguration('filter_alpha'),
+            'filter_type': LaunchConfiguration('filter_type'),
+            **{name: LaunchConfiguration(name)
+               for name in ('kf_q_pos', 'kf_sig_lat', 'kf_sig_depth', 'kf_sig_kin',
+                            'kf_q_ang_deg', 'kf_sig_ang_deg', 'kf_gate')},
         }]
     )
 

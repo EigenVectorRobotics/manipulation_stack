@@ -46,9 +46,9 @@ def read_inputs(args):
     return buffer, poses
 
 
-def filter_poses(buffer, poses, alpha):
+def filter_poses(buffer, poses, alpha, filter_type='ema'):
     node = PoseFilterNode(tf_buffer=buffer)
-    node.set_parameters([Parameter('alpha', value=alpha)])
+    node.set_parameters([Parameter('alpha', value=alpha), Parameter('filter_type', value=filter_type)])
     rows = []
     node.pub = PoseCollector('filtered', rows)
     node.approach_pub = PoseCollector('approach', rows)
@@ -67,7 +67,7 @@ def run_filter(args):
     poses = [pose for pose in poses if stamps is None
              or pose.header.stamp.sec * 10**9 + pose.header.stamp.nanosec in stamps]
     inputs = [pose.header.stamp.sec * 10**9 + pose.header.stamp.nanosec for pose in poses]
-    rows = filter_poses(buffer, poses, args.alpha)
+    rows = filter_poses(buffer, poses, args.alpha, args.filter_type)
     Path(args.output).write_text(json.dumps(dict(input_stamps=inputs, outputs=rows)))
     print(f'Processed {len(inputs)} poses; wrote {len(rows)} outputs to {args.output}')
 
@@ -79,10 +79,12 @@ def main():
     parser.add_argument('--input-topic', default='/track_3d/selected_normal_pose')
     parser.add_argument('--frame', default='left_ankle_roll_link')
     parser.add_argument('--alpha', type=float, default=0.2)
+    parser.add_argument('--filter-type', choices=('ema', 'kalman'), default='ema')
     parser.add_argument('--stamps')
     args = parser.parse_args()
     rclpy.init(args=['--ros-args', '-p', f'target_frame_arm:={args.frame}',
-                     '-p', f'alpha:={args.alpha}', '-p', 'tf_timeout:=0.0'])
+                     '-p', f'alpha:={args.alpha}',
+                     '-p', f'filter_type:={args.filter_type}', '-p', 'tf_timeout:=0.0'])
     try:
         run_filter(args)
     finally:

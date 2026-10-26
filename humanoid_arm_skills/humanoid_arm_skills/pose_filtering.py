@@ -8,20 +8,28 @@ from rcl_interfaces.msg import SetParametersResult
 
 from geometry_msgs.msg import Pose2D, PoseStamped, Quaternion
 
+from humanoid_arm_skills.target_kf import TargetKF
 from humanoid_arm_skills.utils import (
     align_surface_z,
     approach_pose,
+    normal_quaternion,
     normalize_angle,
     quaternion_ema,
+    quaternion_matrix,
+    surface_normal,
     upright_pose,
 )
 
 import tf2_ros
-import tf2_geometry_msgs  # noqa: F401 — registers PoseStamped transform
+import tf2_geometry_msgs
+
+FILTER_TYPES = ('ema', 'kalman')
+KF_PARAMETERS = {'kf_q_pos': 3e-3, 'kf_sig_lat': 4e-3, 'kf_sig_depth': 1.5e-2, 'kf_sig_kin': 2e-3,
+                 'kf_q_ang_deg': 0.5, 'kf_sig_ang_deg': 3.0, 'kf_gate': 16.27}
 
 
 class PoseFilterNode(Node):
-    """Exponential pose filter with timestamped frame transforms."""
+    """Exponential or Kalman pose filter with timestamped frame transforms."""
 
     def __init__(self, tf_buffer: tf2_ros.Buffer | None = None):
         # (1) Configure topics and smoothing.
@@ -30,9 +38,11 @@ class PoseFilterNode(Node):
         output_topic = self.declare_parameter('output_topic', '/pose_out').value
         msg_type = self.declare_parameter('msg_type', 'PoseStamped').value
         self.target_frame = self.declare_parameter('target_frame_arm', 'pelvis').value
-        alpha = self.declare_parameter('alpha', 0.2)
-        if not self._validate_parameters([alpha]).successful:
-            raise ValueError('alpha must be finite and in (0, 1]')
+        filter_parameters = [self.declare_parameter('alpha', 0.2), self.declare_parameter('filter_type', 'ema')]
+        filter_parameters += [self.declare_parameter(name, value) for name, value in KF_PARAMETERS.items()]
+        validation = self._validate_parameters(filter_parameters)
+        if not validation.successful:
+            raise ValueError(validation.reason)
         self.add_on_set_parameters_callback(self._validate_parameters)
         self.declare_parameter('tf_timeout', 0.5)
         self.declare_parameter('lost_timeout', 5.0)
@@ -42,6 +52,7 @@ class PoseFilterNode(Node):
         self.filtered_orientation = None
         self.filter_frame = None
         self.last_input_time = None
+        self.target_kf = None
         self.is_3d = (msg_type == 'PoseStamped')
         self.tf_buffer = tf_buffer
         self.tf_listener = None
@@ -89,6 +100,12 @@ class PoseFilterNode(Node):
                 value = parameter.value
                 if not isinstance(value, float) or not np.isfinite(value) or not 0.0 < value <= 1.0:
                     return SetParametersResult(successful=False, reason='alpha must be a float in (0, 1]')
+            elif parameter.name == 'filter_type' and parameter.value not in FILTER_TYPES:
+                return SetParametersResult(successful=False, reason=f'filter_type must be one of {FILTER_TYPES}')
+            elif parameter.name in KF_PARAMETERS:
+                value = parameter.value
+                if not isinstance(value, float) or not np.isfinite(value) or value <= 0.0:
+                    return SetParametersResult(successful=False, reason=f'{parameter.name} must be a positive float')
         return SetParametersResult(successful=True)
 
     def _reset_filter(self):
@@ -96,6 +113,7 @@ class PoseFilterNode(Node):
         self.filtered_orientation = None
         self.filter_frame = None
         self.last_input_time = None
+        self.target_kf = None
 
     def _update_filter(self, position, orientation, stamp_ns):
         alpha = self.get_parameter('alpha').value
@@ -113,23 +131,45 @@ class PoseFilterNode(Node):
                 difference = normalize_angle(orientation - self.filtered_orientation)
                 self.filtered_orientation = normalize_angle(self.filtered_orientation + alpha * difference)
         self.last_input_time = stamp_ns
+        self.target_kf = None
+
+    def _update_kalman(self, position, orientation, R_frame_measurement, stamp_ns):
+        if self.target_kf is None:
+            p = {name: self.get_parameter(name).value for name in KF_PARAMETERS}
+            self.target_kf = TargetKF(
+                q_pos=p['kf_q_pos'], sig_lat=p['kf_sig_lat'], sig_depth=p['kf_sig_depth'], sig_kin=p['kf_sig_kin'],
+                q_ang=np.radians(p['kf_q_ang_deg']), sig_ang=np.radians(p['kf_sig_ang_deg']), gate=p['kf_gate'])
+        
+        nis, accepted = self.target_kf.update(
+            stamp_ns * 1e-9, position, surface_normal(orientation), R_frame_measurement)
+        
+        if not accepted:
+            self.get_logger().warn(f'Rejected target outlier (NIS {nis:.1f})', throttle_duration_sec=2.0)
+            return
+        
+        self.filtered_position = self.target_kf.p.copy()
+        self.filtered_orientation = normal_quaternion(self.target_kf.n)
+        self.last_input_time = stamp_ns
 
     def _transform_pose(self, msg):
-        if self.tf_buffer and self.target_frame:
-            if msg.header.stamp.sec == 0 and msg.header.stamp.nanosec == 0:
-                self.get_logger().warn('Skipping pose without an observation timestamp', throttle_duration_sec=2.0)
-                return None
-            try:
-                msg = self.tf_buffer.transform(
-                    msg, self.target_frame,
-                    timeout=Duration(seconds=self.get_parameter('tf_timeout').value))
-            except tf2_ros.TransformException as error:
-                self.get_logger().warn(f'TF: {error}', throttle_duration_sec=2.0)
-                return None
-        return msg
+        if not (self.tf_buffer and self.target_frame):
+            return msg, np.eye(3)
+        if msg.header.stamp.sec == 0 and msg.header.stamp.nanosec == 0:
+            self.get_logger().warn('Skipping pose without an observation timestamp', throttle_duration_sec=2.0)
+            return None, None
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.target_frame, msg.header.frame_id, msg.header.stamp,
+                timeout=Duration(seconds=self.get_parameter('tf_timeout').value))
+        except tf2_ros.TransformException as error:
+            self.get_logger().warn(f'TF: {error}', throttle_duration_sec=2.0)
+            return None, None
+        r = transform.transform.rotation
+        rotation = quaternion_matrix(np.array([r.x, r.y, r.z, r.w]))
+        return tf2_geometry_msgs.do_transform_pose_stamped(msg, transform), rotation
 
     def _pose_stamped_cb(self, msg):
-        msg = self._transform_pose(msg)
+        msg, R_frame_measurement = self._transform_pose(msg)
         if msg is None:
             return
         position = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
@@ -144,7 +184,12 @@ class PoseFilterNode(Node):
         if self.filter_frame != msg.header.frame_id:
             self._reset_filter()
             self.filter_frame = msg.header.frame_id
-        self._update_filter(position, orientation / norm, stamp_ns)
+
+        kalman = self.get_parameter('filter_type').value == 'kalman'
+        if kalman:
+            self._update_kalman(position, orientation / norm, R_frame_measurement, stamp_ns)
+        else:
+            self._update_filter(position, orientation / norm, stamp_ns)
         self._publish_pose(msg.header)
 
     def _publish_pose(self, header):
