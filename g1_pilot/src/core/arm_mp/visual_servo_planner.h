@@ -63,7 +63,17 @@ class VisualServoPlanner : public JointSpacePlanner {
 
         void appendFinalLeg(
             const Eigen::MatrixXd& goal_pose,
-            std::vector<Eigen::VectorXd>& joints
+            std::vector<Eigen::VectorXd>& joints,
+            bool retreat = false
+        );
+
+        JointTrajectory appendRetreat(
+            JointTrajectory traj,
+            const Eigen::VectorXd& goal_q,
+            const Eigen::MatrixXd& goal_pose,
+            double time_step,
+            double max_joint_vel,
+            double max_joint_acc
         );
 
         Eigen::Matrix4d intermediate_pose_offset_;

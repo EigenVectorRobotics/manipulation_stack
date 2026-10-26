@@ -36,6 +36,7 @@ constexpr double REJOIN_EPS = 1e-4;         // rad
 
 constexpr double PATH_SEGMENT_EPS = 1e-12;
 constexpr double PREGRASP_DELAY = 1.0;
+constexpr double GOAL_DELAY = 1.0;
 
 JointTrajectory concatenateTrajectories(
     JointTrajectory first,
@@ -132,7 +133,8 @@ Eigen::Matrix4d VisualServoPlanner::startPose(const JointState& start_state) {
 
 void VisualServoPlanner::appendFinalLeg(
     const Eigen::MatrixXd& goal_pose,
-    std::vector<Eigen::VectorXd>& joints
+    std::vector<Eigen::VectorXd>& joints,
+    bool retreat
 ) {
     JointState seed;
     bool have_seed = false;
@@ -146,13 +148,15 @@ void VisualServoPlanner::appendFinalLeg(
         have_seed = true;
     }
 
-    for (std::size_t i = 0; i < final_leg_.size(); ++i) {
-        Eigen::Matrix4d T_abs = goal_pose * final_leg_[i];
-        const int passes =
-            (i + 1 == final_leg_.size()) ? GOAL_REFINEMENT_PASSES : 1;
+    // The retreat runs the leg backwards from the goal, which the seed already holds.
+    const std::size_t steps = retreat ? final_leg_.size() - 1 : final_leg_.size();
+    for (std::size_t i = 0; i < steps; ++i) {
+        Eigen::Matrix4d T_abs = goal_pose * final_leg_[retreat ? steps - 1 - i : i];
+        const int passes = (i + 1 == steps) ? GOAL_REFINEMENT_PASSES : 1;
         JointState js = poseToJointConfig(T_abs, passes, have_seed ? &seed : nullptr, true);
         if (js.position.size() == 0) {
-            std::cout << "[VisualServoPlanner] final-leg IK failed; truncating" << std::endl;
+            std::cout << "[VisualServoPlanner] " << (retreat ? "retreat" : "final-leg")
+                      << " IK failed; truncating" << std::endl;
             break;
         }
 
@@ -163,6 +167,25 @@ void VisualServoPlanner::appendFinalLeg(
         seed = js;
         have_seed = true;
     }
+}
+
+JointTrajectory VisualServoPlanner::appendRetreat(
+    JointTrajectory traj,
+    const Eigen::VectorXd& goal_q,
+    const Eigen::MatrixXd& goal_pose,
+    double time_step,
+    double max_joint_vel,
+    double max_joint_acc
+) {
+    if (traj.position.empty() || traj.position.front().empty()) return {};
+
+    std::vector<Eigen::VectorXd> retreat_path{goal_q};
+    appendFinalLeg(goal_pose, retreat_path, true);
+    if (retreat_path.size() != final_leg_.size()) return {};
+
+    JointTrajectory retreat_traj = timeParameterize(
+        retreat_path, time_step, max_joint_vel, max_joint_acc);
+    return concatenateTrajectories(std::move(traj), retreat_traj, GOAL_DELAY);
 }
 
 std::pair<
@@ -176,16 +199,18 @@ VisualServoPlanner::planPath(
 
     double pos_dist = (goal_pose.block<3,1>(0,3) - T_start.block<3,1>(0,3)).norm();
 
+    std::vector<Eigen::VectorXd> joints;
     if (pos_dist < DIRECT_APPROACH_DISTANCE) {
-        return JointSpacePlanner::planPath(start_state, goal_pose);
+        std::tie(joints, std::ignore) = JointSpacePlanner::planPath(start_state, goal_pose);
+    } else {
+        Eigen::MatrixXd intermediate_mat = goal_pose * intermediate_pose_offset_;
+        std::tie(joints, std::ignore) = JointSpacePlanner::planPath(start_state, intermediate_mat);
+        if (joints.empty()) return {};
+        appendFinalLeg(goal_pose, joints);
     }
-
-    Eigen::MatrixXd intermediate_mat = goal_pose * intermediate_pose_offset_;
-
-    auto [joints, carts] = JointSpacePlanner::planPath(start_state, intermediate_mat);
     if (joints.empty()) return {};
 
-    appendFinalLeg(goal_pose, joints);
+    appendFinalLeg(goal_pose, joints, true);
 
     return {joints, configsToPoses(joints)};
 }
@@ -203,8 +228,11 @@ VisualServoPlanner::planTrajectory(
     double pos_dist = (goal_pose.block<3,1>(0,3) - T_start.block<3,1>(0,3)).norm();
 
     if (pos_dist < DIRECT_APPROACH_DISTANCE) {
-        return JointSpacePlanner::planTrajectory(
+        JointTrajectory direct_traj = JointSpacePlanner::planTrajectory(
             start_state, goal_pose, time_step, max_joint_vel, max_joint_acc);
+        if (waypoints_.empty()) return {};
+        return appendRetreat(std::move(direct_traj), waypoints_.back(), goal_pose,
+                             time_step, max_joint_vel/2, max_joint_acc/4);
     }
 
     Eigen::MatrixXd intermediate_mat = goal_pose * intermediate_pose_offset_;
@@ -223,8 +251,10 @@ VisualServoPlanner::planTrajectory(
         waypoints_, time_step, max_joint_vel, max_joint_acc);
     JointTrajectory forward_traj = timeParameterize(
         forward_path, time_step, max_joint_vel/2, max_joint_acc/4);
-    JointTrajectory traj = concatenateTrajectories(
-        std::move(search_traj), forward_traj, PREGRASP_DELAY);
+    JointTrajectory traj = appendRetreat(
+        concatenateTrajectories(std::move(search_traj), forward_traj, PREGRASP_DELAY),
+        forward_path.back(), goal_pose, time_step, max_joint_vel/2, max_joint_acc/4);
+    if (traj.position.empty()) return {};
 
     last_search_ = waypoints_;
     last_goal_pose_ = goal_pose;
@@ -324,7 +354,7 @@ VisualServoPlanner::replanTrajectory(
 
     std::vector<Eigen::VectorXd> joints;
     joints.reserve(last_search_.size() - rejoin_index + 1);
-    if (start_drift > REJOIN_EPS) joints.push_back(rejoin_q);
+    if ((rejoin_q - last_search_[rejoin_index]).norm() > REJOIN_EPS) joints.push_back(rejoin_q);
     for (std::size_t i = rejoin_index; i < last_search_.size(); ++i) {
         joints.push_back(last_search_[i]);
     }
@@ -340,8 +370,10 @@ VisualServoPlanner::replanTrajectory(
         joints, time_step, max_joint_vel, max_joint_acc, &start_vel);
     JointTrajectory forward_traj = timeParameterize(
         forward_path, time_step, max_joint_vel, max_joint_acc);
-    JointTrajectory traj = concatenateTrajectories(
-        std::move(search_traj), forward_traj, PREGRASP_DELAY);
+    JointTrajectory traj = appendRetreat(
+        concatenateTrajectories(std::move(search_traj), forward_traj, PREGRASP_DELAY),
+        forward_path.back(), goal4, time_step, max_joint_vel, max_joint_acc);
+    if (traj.position.empty()) return {};
 
     std::cout << "[replanTrajectory] tier 0, search reused"
               << " [goal drift " << goal_drift
