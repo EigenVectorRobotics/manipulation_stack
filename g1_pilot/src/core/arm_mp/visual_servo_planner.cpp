@@ -38,6 +38,10 @@ constexpr double PATH_SEGMENT_EPS = 1e-12;
 constexpr double PREGRASP_DELAY = 1.0;
 constexpr double GOAL_DELAY = 1.0;
 
+double finalLegStart(const JointTrajectory& search, double time_step) {
+    return (search.position.front().size() - 1) * time_step + std::ceil(PREGRASP_DELAY / time_step) * time_step;
+}
+
 JointTrajectory concatenateTrajectories(
     JointTrajectory first,
     const JointTrajectory& second,
@@ -227,12 +231,14 @@ VisualServoPlanner::planTrajectory(
 
     double pos_dist = (goal_pose.block<3,1>(0,3) - T_start.block<3,1>(0,3)).norm();
 
-    if (pos_dist < DIRECT_APPROACH_DISTANCE) {
+    if (allow_direct_ && pos_dist < DIRECT_APPROACH_DISTANCE) {
         JointTrajectory direct_traj = JointSpacePlanner::planTrajectory(
             start_state, goal_pose, time_step, max_joint_vel, max_joint_acc);
         if (waypoints_.empty()) return {};
-        return appendRetreat(std::move(direct_traj), waypoints_.back(), goal_pose,
-                             time_step, max_joint_vel/2, max_joint_acc/4);
+        JointTrajectory traj = appendRetreat(std::move(direct_traj), waypoints_.back(), goal_pose,
+                                             time_step, max_joint_vel/2, max_joint_acc/4);
+        traj.lock_time = 0.0;
+        return traj;
     }
 
     Eigen::MatrixXd intermediate_mat = goal_pose * intermediate_pose_offset_;
@@ -251,10 +257,12 @@ VisualServoPlanner::planTrajectory(
         waypoints_, time_step, max_joint_vel, max_joint_acc);
     JointTrajectory forward_traj = timeParameterize(
         forward_path, time_step, max_joint_vel/2, max_joint_acc/4);
+    const double lock_time = finalLegStart(search_traj, time_step);
     JointTrajectory traj = appendRetreat(
         concatenateTrajectories(std::move(search_traj), forward_traj, PREGRASP_DELAY),
         forward_path.back(), goal_pose, time_step, max_joint_vel/2, max_joint_acc/4);
     if (traj.position.empty()) return {};
+    traj.lock_time = lock_time;
 
     last_search_ = waypoints_;
     last_goal_pose_ = goal_pose;
@@ -342,8 +350,15 @@ VisualServoPlanner::replanTrajectory(
     }
 
     if (reason != nullptr) {
-        JointTrajectory traj = planTrajectory(
-            start_state, goal_pose, time_step, max_joint_vel, max_joint_acc);
+        allow_direct_ = false;
+        JointTrajectory traj;
+        try {
+            traj = planTrajectory(start_state, goal_pose, time_step, max_joint_vel, max_joint_acc);
+        } catch (...) {
+            allow_direct_ = true;
+            throw;
+        }
+        allow_direct_ = true;
 
         std::cout << "[replanTrajectory] NOT tier 0 (" << reason
                   << ") [goal drift " << goal_drift << " m / limit "
@@ -370,10 +385,12 @@ VisualServoPlanner::replanTrajectory(
         joints, time_step, max_joint_vel, max_joint_acc, &start_vel);
     JointTrajectory forward_traj = timeParameterize(
         forward_path, time_step, max_joint_vel, max_joint_acc);
+    const double lock_time = finalLegStart(search_traj, time_step);
     JointTrajectory traj = appendRetreat(
         concatenateTrajectories(std::move(search_traj), forward_traj, PREGRASP_DELAY),
         forward_path.back(), goal4, time_step, max_joint_vel, max_joint_acc);
     if (traj.position.empty()) return {};
+    traj.lock_time = lock_time;
 
     std::cout << "[replanTrajectory] tier 0, search reused"
               << " [goal drift " << goal_drift

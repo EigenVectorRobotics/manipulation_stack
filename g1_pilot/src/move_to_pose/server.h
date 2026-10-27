@@ -49,6 +49,7 @@ private:
     struct Plan {
         Trajectory trajectory;
         std::vector<Eigen::MatrixXd> path;
+        double lock_time = -1.0;
     };
 
     // Setup and goal lifecycle: server.cpp.
@@ -83,7 +84,7 @@ private:
 
     // Trajectory execution: control.cpp. Helpers ending in _locked_ require ctrl_mutex_.
     GoalStatus install_(const std::shared_ptr<GoalHandle> & goal,
-                        const Trajectory & trajectory, const Eigen::MatrixXd & target);
+                        const Trajectory & trajectory, const Eigen::MatrixXd & target, double lock_time);
     bool stop_for_replan_(const std::shared_ptr<GoalHandle> & goal, JointState & start);
     void clear_trajectory_();
     void clear_trajectory_locked_();
@@ -131,6 +132,11 @@ private:
     rclcpp::Time traj_start_;
     double error_ = 0.0;
     Eigen::MatrixXd planned_for_;
+    // The planned target in its own frame, so body sway in the pelvis frame does not look like a moved target
+    Eigen::MatrixXd planned_source_;
+    std::string planned_source_frame_;
+    double lock_time_ = -1.0;
+    bool final_leg_refreshed_ = false;
 
     // target_mutex_ protects the target stream independently of control and goals.
     std::mutex target_mutex_;

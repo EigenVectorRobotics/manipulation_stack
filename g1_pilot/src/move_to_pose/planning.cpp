@@ -56,7 +56,15 @@ void MoveToPoseServer::run_(const std::shared_ptr<GoalHandle> & goal)
     RCLCPP_INFO(get_logger(), "Planned %zu waypoints", plan.trajectory.points.size());
 
     // (3) Install only while this goal owns the arm, then monitor execution.
-    const auto status = install_(goal, plan.trajectory, target);
+    {
+        std::lock_guard<std::mutex> lock(ctrl_mutex_);
+        Eigen::Isometry3d source;
+        tf2::fromMsg(request->target_pose.pose, source);
+        planned_source_ = source.matrix();
+        planned_source_frame_ = request->target_pose.header.frame_id;
+        final_leg_refreshed_ = false;
+    }
+    const auto status = install_(goal, plan.trajectory, target, plan.lock_time);
     if (status != GoalStatus::Active) {
         finish_(goal, false, 0.0, status == GoalStatus::Cancelled
             ? "Cancelled while planning" : "Preempted by a newer goal");
@@ -83,6 +91,7 @@ MoveToPoseServer::Plan MoveToPoseServer::plan_(
     result.path.reserve(configs.size());
     for (const auto & q : configs) result.path.push_back(planner_->forward_kinematics(q, left));
     result.trajectory = convertToTrajectory(planned, frame_, get_clock()->now());
+    result.lock_time = planned.lock_time;
     if (result.trajectory.points.empty()) throw std::runtime_error("no waypoints");
     return result;
 }
@@ -102,7 +111,7 @@ void MoveToPoseServer::try_replan_(const std::shared_ptr<GoalHandle> & goal)
             "Replan failed: %s; holding position", e.what());
         return;
     }
-    if (install_(goal, plan.trajectory, target) != GoalStatus::Active) return;
+    if (install_(goal, plan.trajectory, target, plan.lock_time) != GoalStatus::Active) return;
     publish_path_(plan.path);
     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
         "Replanned to [%.3f %.3f %.3f], %zu waypoints",
@@ -124,13 +133,38 @@ Eigen::MatrixXd MoveToPoseServer::replan_target_()
 
     // (2) Finish braking before planning; a held endpoint always needs a replacement.
     std::lock_guard<std::mutex> lock(ctrl_mutex_);
-    if (mode_ == ControlMode::Braking) return {};
-    if (mode_ == ControlMode::Holding) return target;
+    if (mode_ == ControlMode::Braking || mode_ == ControlMode::Complete) return {};
+    Eigen::Isometry3d source_iso;
+    tf2::fromMsg(update.pose, source_iso);
+    const Eigen::MatrixXd source = source_iso.matrix();
+    if (mode_ == ControlMode::Tracking && lock_time_ >= 0.0 &&
+        (get_clock()->now() - traj_start_).seconds() >= lock_time_) {
+        // The body shifts while the arm reaches out, so the final leg is replanned once against the latest target
+        if (!final_leg_refreshed_) {
+            final_leg_refreshed_ = true;
+            planned_source_ = source;
+            planned_source_frame_ = update.header.frame_id;
+            RCLCPP_INFO(get_logger(), "Refreshing the final leg against the latest target");
+            return target;
+        }
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, "Target fixed for the final leg");
+        return {};
+    }
+    if (mode_ == ControlMode::Holding) {
+        planned_source_ = source;
+        planned_source_frame_ = update.header.frame_id;
+        return target;
+    }
     if (planned_for_.size() == 0) return {};
-    const double dp = (target.block<3, 1>(0, 3) - planned_for_.block<3, 1>(0, 3)).norm();
-    const Eigen::Matrix3d dR = planned_for_.block<3, 3>(0, 0).transpose() * target.block<3, 3>(0, 0);
+    const bool same_frame = planned_source_.size() != 0 && planned_source_frame_ == update.header.frame_id;
+    const Eigen::MatrixXd & before = same_frame ? planned_source_ : planned_for_;
+    const Eigen::MatrixXd & now = same_frame ? source : target;
+    const double dp = (now.block<3, 1>(0, 3) - before.block<3, 1>(0, 3)).norm();
+    const Eigen::Matrix3d dR = before.block<3, 3>(0, 0).transpose() * now.block<3, 3>(0, 0);
     if (dp >= get_parameter("replan_position_delta").as_double() ||
         std::abs(Eigen::AngleAxisd(dR).angle()) >= get_parameter("replan_orientation_delta").as_double()) {
+        planned_source_ = source;
+        planned_source_frame_ = update.header.frame_id;
         return target;
     }
     return {};

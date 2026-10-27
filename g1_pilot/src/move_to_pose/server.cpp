@@ -61,10 +61,10 @@ void MoveToPoseServer::declare_parameters_()
     declare_parameter<double>("control_period", 0.01);
     declare_parameter<double>("feedback_period", 0.1);
     declare_parameter<double>("plan_time_step", 0.01);
-    declare_parameter<double>("max_joint_vel", 1.0);
-    declare_parameter<double>("max_joint_acc", 2.0);
+    declare_parameter<double>("max_joint_vel", 0.5);
+    declare_parameter<double>("max_joint_acc", 1.0);
     declare_parameter<double>("tf_timeout", 0.5);
-    declare_parameter<double>("replan_position_delta", 0.005);
+    declare_parameter<double>("replan_position_delta", 0.01);
     declare_parameter<double>("replan_orientation_delta", 0.05);
     declare_parameter<double>("replan_min_interval", 0.25);
     declare_parameter<double>("arm_safety_distance_x", 0.0);

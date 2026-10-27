@@ -11,7 +11,7 @@ class VisualServoPlanner : public JointSpacePlanner {
             pinocchio::Model& model,
             std::shared_ptr<HumanoidIK> ik_handle,
             bool left_arm = false,
-            double approach_offset = 0.05,
+            double approach_offset = 0.10,
             int final_leg_steps = 8,
             double step_size = 0.05,
             double goal_bias = 0.1,
@@ -84,6 +84,8 @@ class VisualServoPlanner : public JointSpacePlanner {
         Eigen::Matrix4d last_goal_pose_ = Eigen::Matrix4d::Identity();
         Eigen::VectorXd last_start_q_;
         bool last_plan_valid_ = false;
+        // Replans always go back through the pre-grasp point; only a goal's first plan may approach directly
+        bool allow_direct_ = true;
         bool last_plan_left_ = false;
 };
 
