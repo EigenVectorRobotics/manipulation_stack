@@ -22,6 +22,7 @@
 #include <limits>
 #include <stdexcept>
 #include <tuple>
+#include <utility>
 
 namespace ob = ompl::base;
 namespace og = ompl::geometric;
@@ -39,6 +40,9 @@ constexpr double FIXED_JOINT_RANGE = 1e-3;
 
 constexpr double DLS_FALLBACK_POS_ERR = 1e-3;   // m
 constexpr double DLS_FALLBACK_ROT_ERR = 1e-2;   // rad
+
+// Joint-space step between consecutive refinement passes below which the IK is taken as converged.
+constexpr double IK_CONVERGENCE_TOL = 1e-4;     // rad
 
 constexpr double SEED_REUSE_POS = 0.15;   // m
 constexpr double SEED_REUSE_ROT = 0.5;    // rad
@@ -382,13 +386,22 @@ JointState JointSpacePlanner::poseToJointConfig(
             nullptr, dls
         );
 
-        for (int pass = 1; pass < refinement_passes; ++pass) {
-            out = ik_handle_->solve_ik(
+        for (int pass = 1; pass < refinement_passes && !out.position.empty(); ++pass) {
+            JointState next = ik_handle_->solve_ik(
                 pose, left_arm_,
                 nullptr, nullptr,
                 &pos_err, &rot_err,
                 nullptr, dls
             );
+            if (next.position.size() != out.position.size()) return next;
+
+            double step_sq = 0.0;
+            for (std::size_t j = 0; j < out.position.size(); ++j) {
+                const double d = next.position[j] - out.position[j];
+                step_sq += d * d;
+            }
+            out = std::move(next);
+            if (std::sqrt(step_sq) < IK_CONVERGENCE_TOL) break;
         }
         return out;
     };
@@ -792,7 +805,7 @@ JointSpacePlanner::planPath(
     const Eigen::MatrixXd& start_pose
 ) {
     std::cout << "IK for start pose:" << std::endl;
-    JointState start_state = poseToJointConfig(start_pose, 3);
+    JointState start_state = poseToJointConfig(start_pose, 5);
     if (start_state.position.size() == 0)
         return {};
 
@@ -807,7 +820,7 @@ JointSpacePlanner::planPath(
     const Eigen::MatrixXd& goal_pose
 ) {
     std::cout << "IK for goal pose:" << std::endl;
-    JointState goal_state = solveGoalConfig(goal_pose, start_state, 2);
+    JointState goal_state = solveGoalConfig(goal_pose, start_state, 5);
     if (goal_state.position.size() == 0)
         return {};
 
@@ -882,7 +895,7 @@ JointSpacePlanner::planTrajectory(
     double max_joint_acc
 ) {
     std::cout << "IK for start pose:" << std::endl;
-    JointState start_state = poseToJointConfig(start_pose, 3);
+    JointState start_state = poseToJointConfig(start_pose, 5);
     if (start_state.position.size() == 0)
         return {};
 
@@ -899,7 +912,7 @@ JointSpacePlanner::planTrajectory(
     double max_joint_acc
 ){
     std::cout << "IK for goal pose:" << std::endl;
-    JointState goal_state = solveGoalConfig(goal_pose, start_state, 2);
+    JointState goal_state = solveGoalConfig(goal_pose, start_state, 5);
     if (goal_state.position.size() == 0)
         return {};
 
