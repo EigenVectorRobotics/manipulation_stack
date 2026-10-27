@@ -28,6 +28,7 @@ struct JointTrajectory {
     std::vector<std::vector<double>> velocity;
     std::vector<std::vector<double>> acceleration;
     double time_step = 0.0;
+    double lock_time = -1.0;  // seconds after which the target stays fixed; negative never fixes it
 };
 
 struct RobotConfig {

@@ -26,7 +26,7 @@ void MoveToPoseServer::control_tick_()
 
 MoveToPoseServer::GoalStatus MoveToPoseServer::install_(
     const std::shared_ptr<GoalHandle> & goal, const Trajectory & trajectory,
-    const Eigen::MatrixXd & target)
+    const Eigen::MatrixXd & target, double lock_time)
 {
     std::scoped_lock lock(goal_mutex_, ctrl_mutex_);
     if (active_ != goal) return GoalStatus::Preempted;
@@ -36,6 +36,7 @@ MoveToPoseServer::GoalStatus MoveToPoseServer::install_(
     }
     set_trajectory_locked_(trajectory, ControlMode::Tracking);
     planned_for_ = target;
+    lock_time_ = lock_time;
     return GoalStatus::Active;
 }
 
