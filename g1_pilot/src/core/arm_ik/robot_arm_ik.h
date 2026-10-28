@@ -57,6 +57,8 @@ public:
 protected:
     void setup_optimization();
     void filter_adjacent_collision_pairs();
+    void convexify_collision_geometry();
+    void filter_rest_collision_pairs();
 
     void generalize_ext_wrenches(
         const Eigen::VectorXd* EE_efrc_L = nullptr,

@@ -16,7 +16,8 @@ namespace {
 // Below this start-to-goal distance the approach offset is skipped and the
 // goal is planned to directly.
 constexpr double DIRECT_APPROACH_DISTANCE = 0.05;
-constexpr int GOAL_REFINEMENT_PASSES = 2;
+constexpr int PREGRASP_REFINEMENT_PASSES = 10;
+constexpr int GOAL_REFINEMENT_PASSES = 5;
 
 constexpr double REPLAN_LOCAL_POS = 0.01;   // m
 constexpr double REPLAN_LOCAL_ROT = 0.05;   // rad
@@ -199,6 +200,7 @@ VisualServoPlanner::planPath(
     const JointState& start_state,
     const Eigen::MatrixXd& goal_pose
 ) {
+    setWall(goal_pose);
     Eigen::Matrix4d T_start = startPose(start_state);
 
     double pos_dist = (goal_pose.block<3,1>(0,3) - T_start.block<3,1>(0,3)).norm();
@@ -227,6 +229,7 @@ VisualServoPlanner::planTrajectory(
     double max_joint_vel,
     double max_joint_acc
 ) {
+    setWall(goal_pose);
     Eigen::Matrix4d T_start = startPose(start_state);
 
     double pos_dist = (goal_pose.block<3,1>(0,3) - T_start.block<3,1>(0,3)).norm();
@@ -243,7 +246,7 @@ VisualServoPlanner::planTrajectory(
 
     Eigen::MatrixXd intermediate_mat = goal_pose * intermediate_pose_offset_;
 
-    JointState intermediate_state = solveGoalConfig(intermediate_mat, start_state, 2);
+    JointState intermediate_state = solveGoalConfig(intermediate_mat, start_state, PREGRASP_REFINEMENT_PASSES);
     if (intermediate_state.position.size() == 0) return {};
 
     (void) JointSpacePlanner::planPath(start_state, intermediate_state);
@@ -281,6 +284,7 @@ VisualServoPlanner::replanTrajectory(
     double max_joint_vel,
     double max_joint_acc
 ) {
+    setWall(goal_pose);
     const Eigen::Matrix4d goal4 = goal_pose;
 
     const char* reason = nullptr;
