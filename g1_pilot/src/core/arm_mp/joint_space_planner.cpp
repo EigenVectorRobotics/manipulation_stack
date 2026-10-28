@@ -49,6 +49,8 @@ constexpr double SEED_REUSE_ROT = 0.5;    // rad
 
 // How far past the target plane the end effector may sit before a state counts as hitting the wall.
 constexpr double WALL_TOLERANCE = -0.02;  // m
+// A start already inside the wall margin is allowed this much further, so the search can still leave it.
+constexpr double WALL_START_SLACK = 0.002; // m
 constexpr double WALL_MOVE_POS = 0.005;   // m
 constexpr double WALL_MOVE_ROT = 0.05;    // rad
 
@@ -340,7 +342,7 @@ JointSpacePlanner::JointSpacePlanner(
         for (int i = 0; i < nq_; ++i) rrt_->q_check(i) = rv->values[i];
         if (wall_set_) {
             const Eigen::Vector3d offset = configToPose(rrt_->q_check).block<3,1>(0,3) - wall_pose_.block<3,1>(0,3);
-            if (wall_normal_.dot(offset) > WALL_TOLERANCE) return false;
+            if (wall_normal_.dot(offset) > WALL_TOLERANCE + wall_relax_) return false;
         }
         if (ik_handle_ == nullptr) return true;
         return !ik_handle_->check_collision(rrt_->q_check);
@@ -486,6 +488,23 @@ void JointSpacePlanner::setWall(const Eigen::Matrix4d& target_pose) {
     wall_set_ = true;
 }
 
+void JointSpacePlanner::relaxWallForStart(const Eigen::VectorXd& start_q) {
+    // The wall moves with the target, so a held arm can end up inside the margin and would otherwise never replan.
+    double relax = 0.0;
+    if (wall_set_) {
+        const Eigen::Vector3d offset = configToPose(start_q).block<3,1>(0,3) - wall_pose_.block<3,1>(0,3);
+        relax = std::max(0.0, wall_normal_.dot(offset) + WALL_START_SLACK - WALL_TOLERANCE);
+    }
+    if (relax != wall_relax_) {
+        rrt_->roadmap->clearValidity();
+        if (relax > 0.0) {
+            std::cout << "[runSearch] start is " << relax * 1e3 << " mm inside the wall margin; relaxing it for this search"
+                      << std::endl;
+        }
+    }
+    wall_relax_ = relax;
+}
+
 bool JointSpacePlanner::motionValid(
     const Eigen::VectorXd& a,
     const Eigen::VectorXd& b
@@ -545,6 +564,7 @@ bool JointSpacePlanner::runRRTStar(
     std::vector<Eigen::VectorXd>& path
 ) {
     rrt_->setQuery(start_q, goal_q);
+    relaxWallForStart(start_q);
 
     if (!rrt_->si->isValid(rrt_->start.get())) {
         std::cout << "[runSearch] start state is in collision" << std::endl;

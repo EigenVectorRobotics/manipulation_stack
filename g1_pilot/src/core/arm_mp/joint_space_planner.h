@@ -140,6 +140,7 @@ class JointSpacePlanner {
 
         // States whose end effector lies past the target's vertical plane are invalid.
         void setWall(const Eigen::Matrix4d& target_pose);
+        void relaxWallForStart(const Eigen::VectorXd& start_q);
 
         /**
          * @brief Make the roadmap match the joints this query may move.
@@ -214,6 +215,7 @@ class JointSpacePlanner {
 
         Eigen::Matrix4d wall_pose_ = Eigen::Matrix4d::Identity();
         Eigen::Vector3d wall_normal_ = Eigen::Vector3d::UnitX();
+        double wall_relax_ = 0.0;
         bool wall_set_ = false;
 };
 
