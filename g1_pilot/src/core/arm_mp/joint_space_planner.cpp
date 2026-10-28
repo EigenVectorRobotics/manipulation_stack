@@ -42,7 +42,7 @@ constexpr double DLS_FALLBACK_POS_ERR = 1e-3;   // m
 constexpr double DLS_FALLBACK_ROT_ERR = 1e-2;   // rad
 
 // Joint-space step between consecutive refinement passes below which the IK is taken as converged.
-constexpr double IK_CONVERGENCE_TOL = 1e-4;     // rad
+constexpr double IK_CONVERGENCE_TOL = 1e-3;     // rad
 
 constexpr double SEED_REUSE_POS = 0.15;   // m
 constexpr double SEED_REUSE_ROT = 0.5;    // rad

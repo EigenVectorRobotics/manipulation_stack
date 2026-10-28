@@ -8,6 +8,7 @@
 #include <pinocchio/collision/collision.hpp>
 #include <pinocchio/spatial/se3.hpp>
 #include <casadi/casadi.hpp>
+#include <coal/BVH/BVH_model.h>
 
 #include <memory>
 #include <fstream>
@@ -81,8 +82,10 @@ HumanoidIK::HumanoidIK(
     // oMLidar = model_.getFrameId("mid360_link", pinocchio::BODY);
 
     // Setup Collision
-    geom_model_.addAllCollisionPairs();    
+    geom_model_.addAllCollisionPairs();
     filter_adjacent_collision_pairs();
+    convexify_collision_geometry();
+    filter_rest_collision_pairs();
 
 
     // Initialize data structures
@@ -122,14 +125,7 @@ HumanoidIK::HumanoidIK(
 HumanoidIK::~HumanoidIK() = default;
 
 bool HumanoidIK::check_collision(const Eigen::VectorXd& q) {
-    // The collision meshes are coarse convex hulls. At rest the hands hang
-    // beside the hips and six hull pairs graze by under 5 mm, which would
-    // reject every plan from the robot's natural pose. Treat a pair as
-    // colliding only once it penetrates deeper than collision_margin_
-    // (negative, metres); 0.0 restores exact contact checking.
-    //
-    // stopAtFirstCollision must be false: the first contact found is not
-    // necessarily the deepest one.
+    // Colliding means hulls deeper than collision_margin_; stopAtFirst stays false as the first contact may be shallow.
     const bool any_contact = pinocchio::computeCollisions(
         model_, data_, geom_model_, geom_data_, q, collision_margin_ >= 0.0
     );
@@ -168,6 +164,33 @@ void HumanoidIK::filter_adjacent_collision_pairs() {
     }
     
     geom_model_.collisionPairs = filtered_pairs;
+}
+
+void HumanoidIK::convexify_collision_geometry() {
+    // Mesh-mesh contacts report only where triangles cross, so a buried link reads a few mm; hulls give true depth.
+    for (auto& object : geom_model_.geometryObjects) {
+        auto mesh = std::dynamic_pointer_cast<coal::BVHModelBase>(object.geometry);
+        if (!mesh) continue;
+        mesh->buildConvexHull(false, "Qt");
+        object.geometry = mesh->convex;
+        object.geometry->computeLocalAABB();
+    }
+}
+
+void HumanoidIK::filter_rest_collision_pairs() {
+    // Hulls already overlapping with the arms hanging at rest would reject every plan from the natural pose.
+    const Eigen::VectorXd rest = Eigen::VectorXd::Zero(model_.nq)
+        .cwiseMax(model_.lowerPositionLimit)
+        .cwiseMin(model_.upperPositionLimit);
+    pinocchio::Data data(model_);
+    pinocchio::GeometryData geom_data(geom_model_);
+    pinocchio::computeCollisions(model_, data, geom_model_, geom_data, rest, false);
+
+    std::vector<pinocchio::CollisionPair> kept;
+    for (std::size_t k = 0; k < geom_model_.collisionPairs.size(); ++k) {
+        if (!geom_data.collisionResults[k].isCollision()) kept.push_back(geom_model_.collisionPairs[k]);
+    }
+    geom_model_.collisionPairs = kept;
 }
 
 void HumanoidIK::set_active_joints(const std::vector<bool>& joint_moves) {

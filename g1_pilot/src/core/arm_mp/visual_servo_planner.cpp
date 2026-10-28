@@ -16,6 +16,7 @@ namespace {
 // Below this start-to-goal distance the approach offset is skipped and the
 // goal is planned to directly.
 constexpr double DIRECT_APPROACH_DISTANCE = 0.05;
+constexpr int PREGRASP_REFINEMENT_PASSES = 10;
 constexpr int GOAL_REFINEMENT_PASSES = 5;
 
 constexpr double REPLAN_LOCAL_POS = 0.01;   // m
@@ -245,7 +246,7 @@ VisualServoPlanner::planTrajectory(
 
     Eigen::MatrixXd intermediate_mat = goal_pose * intermediate_pose_offset_;
 
-    JointState intermediate_state = solveGoalConfig(intermediate_mat, start_state, GOAL_REFINEMENT_PASSES);
+    JointState intermediate_state = solveGoalConfig(intermediate_mat, start_state, PREGRASP_REFINEMENT_PASSES);
     if (intermediate_state.position.size() == 0) return {};
 
     (void) JointSpacePlanner::planPath(start_state, intermediate_state);
