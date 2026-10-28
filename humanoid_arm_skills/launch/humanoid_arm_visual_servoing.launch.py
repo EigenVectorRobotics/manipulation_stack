@@ -115,7 +115,7 @@ def generate_launch_description():
         parameters=[{
             'filtered_pose_topic': PythonExpression(
                 ["'", LaunchConfiguration('normal_pose_topic'),
-                 "_filtered/arm_approach'"]),
+                 "_filtered/arm_upright'"]),
             'keyboard_input_topic': LaunchConfiguration(
                 'keyboard_input_topic'),
             'left_ee_pose_topic': LaunchConfiguration('left_ee_pose_topic'),
