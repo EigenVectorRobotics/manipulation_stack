@@ -137,18 +137,18 @@ Eigen::MatrixXd MoveToPoseServer::replan_target_()
     Eigen::Isometry3d source_iso;
     tf2::fromMsg(update.pose, source_iso);
     const Eigen::MatrixXd source = source_iso.matrix();
+    if (mode_ == ControlMode::Tracking && final_leg_refreshed_) {
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, "Target fixed for the final leg");
+        return {};
+    }
     if (mode_ == ControlMode::Tracking && lock_time_ >= 0.0 &&
         (get_clock()->now() - traj_start_).seconds() >= lock_time_) {
         // The body shifts while the arm reaches out, so the final leg is replanned once against the latest target
-        if (!final_leg_refreshed_) {
-            final_leg_refreshed_ = true;
-            planned_source_ = source;
-            planned_source_frame_ = update.header.frame_id;
-            RCLCPP_INFO(get_logger(), "Refreshing the final leg against the latest target");
-            return target;
-        }
-        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, "Target fixed for the final leg");
-        return {};
+        final_leg_refreshed_ = true;
+        planned_source_ = source;
+        planned_source_frame_ = update.header.frame_id;
+        RCLCPP_INFO(get_logger(), "Refreshing the final leg against the latest target");
+        return target;
     }
     if (mode_ == ControlMode::Holding) {
         planned_source_ = source;
