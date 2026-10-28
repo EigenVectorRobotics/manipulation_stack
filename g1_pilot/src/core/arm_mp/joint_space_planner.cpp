@@ -47,6 +47,11 @@ constexpr double IK_CONVERGENCE_TOL = 1e-4;     // rad
 constexpr double SEED_REUSE_POS = 0.15;   // m
 constexpr double SEED_REUSE_ROT = 0.5;    // rad
 
+// How far past the target plane the end effector may sit before a state counts as hitting the wall.
+constexpr double WALL_TOLERANCE = -0.02;  // m
+constexpr double WALL_MOVE_POS = 0.005;   // m
+constexpr double WALL_MOVE_ROT = 0.05;    // rad
+
 /**
  * @brief Natural cubic spline through the waypoints, parameterised by
  * cumulative chord length in joint space.
@@ -333,6 +338,10 @@ JointSpacePlanner::JointSpacePlanner(
     rrt_->si->setStateValidityChecker([this](const ob::State* s) {
         const auto* rv = s->as<ob::RealVectorStateSpace::StateType>();
         for (int i = 0; i < nq_; ++i) rrt_->q_check(i) = rv->values[i];
+        if (wall_set_) {
+            const Eigen::Vector3d offset = configToPose(rrt_->q_check).block<3,1>(0,3) - wall_pose_.block<3,1>(0,3);
+            if (wall_normal_.dot(offset) > WALL_TOLERANCE) return false;
+        }
         if (ik_handle_ == nullptr) return true;
         return !ik_handle_->check_collision(rrt_->q_check);
     });
@@ -463,6 +472,18 @@ void JointSpacePlanner::ensureSearchSpace(const Eigen::VectorXd& reference_q) {
         rrt_->roadmap->clearValidity();
         roadmap_fixed_q_ = reference_q;
     }
+}
+
+void JointSpacePlanner::setWall(const Eigen::Matrix4d& target_pose) {
+    // Edge validity cached on the roadmap depends on the wall, so it is cleared when the wall moves.
+    if (!wall_set_ || !poseNear(wall_pose_, target_pose, WALL_MOVE_POS, WALL_MOVE_ROT)) {
+        rrt_->roadmap->clearValidity();
+    }
+    // The wall is taken as vertical in the planning frame, which discards the tilt of the detected normal.
+    const Eigen::Vector3d n = target_pose.block<3,1>(0,0);
+    wall_pose_ = target_pose;
+    wall_normal_ = Eigen::Vector3d(n.x(), n.y(), 0.0).normalized();
+    wall_set_ = true;
 }
 
 bool JointSpacePlanner::motionValid(

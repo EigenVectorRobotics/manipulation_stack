@@ -138,6 +138,9 @@ class JointSpacePlanner {
          */
         bool motionValid(const Eigen::VectorXd& a, const Eigen::VectorXd& b);
 
+        // States whose end effector lies past the target's vertical plane are invalid.
+        void setWall(const Eigen::Matrix4d& target_pose);
+
         /**
          * @brief Make the roadmap match the joints this query may move.
          *
@@ -208,6 +211,10 @@ class JointSpacePlanner {
         Eigen::Matrix4d cached_goal_pose_ = Eigen::Matrix4d::Identity();
         bool cached_goal_valid_ = false;
         bool cached_goal_left_ = false;
+
+        Eigen::Matrix4d wall_pose_ = Eigen::Matrix4d::Identity();
+        Eigen::Vector3d wall_normal_ = Eigen::Vector3d::UnitX();
+        bool wall_set_ = false;
 };
 
 } // namespace HumanoidPilot

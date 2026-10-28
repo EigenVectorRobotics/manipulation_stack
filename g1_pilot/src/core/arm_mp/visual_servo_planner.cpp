@@ -199,6 +199,7 @@ VisualServoPlanner::planPath(
     const JointState& start_state,
     const Eigen::MatrixXd& goal_pose
 ) {
+    setWall(goal_pose);
     Eigen::Matrix4d T_start = startPose(start_state);
 
     double pos_dist = (goal_pose.block<3,1>(0,3) - T_start.block<3,1>(0,3)).norm();
@@ -227,6 +228,7 @@ VisualServoPlanner::planTrajectory(
     double max_joint_vel,
     double max_joint_acc
 ) {
+    setWall(goal_pose);
     Eigen::Matrix4d T_start = startPose(start_state);
 
     double pos_dist = (goal_pose.block<3,1>(0,3) - T_start.block<3,1>(0,3)).norm();
@@ -281,6 +283,7 @@ VisualServoPlanner::replanTrajectory(
     double max_joint_vel,
     double max_joint_acc
 ) {
+    setWall(goal_pose);
     const Eigen::Matrix4d goal4 = goal_pose;
 
     const char* reason = nullptr;
