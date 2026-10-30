@@ -7,6 +7,7 @@ from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rcl_interfaces.msg import SetParametersResult
 
 from geometry_msgs.msg import Pose2D, PoseStamped, Quaternion
+from std_msgs.msg import Bool
 
 from humanoid_arm_skills.target_kf import TargetKF
 from humanoid_arm_skills.utils import (
@@ -46,6 +47,7 @@ class PoseFilterNode(Node):
         self.add_on_set_parameters_callback(self._validate_parameters)
         self.declare_parameter('tf_timeout', 0.5)
         self.declare_parameter('lost_timeout', 5.0)
+        tracking_topic = self.declare_parameter('tracking_topic', '/track_3d/is_tracking').value
 
         # (2) Initialize the estimate and TF listener.
         self.filtered_position = None
@@ -70,6 +72,14 @@ class PoseFilterNode(Node):
         else:
             self.create_subscription(Pose2D, input_topic, self._pose2d_cb, 5)
             self.pub = self.create_publisher(Pose2D, output_topic, 5)
+        # A new target starts a new estimate. Without this the old one survives
+        # a target switch shorter than lost_timeout, the gate rejects the new
+        # target as an outlier, and the old position goes out under new stamps.
+        # track_3d reports False every frame it is not tracking, which also
+        # clears a stale pose that was still in flight when the reset landed.
+        if tracking_topic:
+            self.create_subscription(
+                Bool, tracking_topic, lambda msg: None if msg.data else self._reset_filter(), 5)
 
         # (4) Report configuration.
         self.get_logger().debug(
