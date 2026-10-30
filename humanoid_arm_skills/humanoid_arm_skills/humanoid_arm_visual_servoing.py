@@ -55,16 +55,26 @@ class VisualServoArmNode(Node):
         self.move_to_pose_cancel_service = self.declare_parameter(
             'move_to_pose_cancel_service',
             self.move_to_pose_action + '/cancel').value
+        # Only move toward a pose tracked from this goal's own seed.
+        self.require_seed = self.declare_parameter('require_seed', True).value
 
         # ── Dynamic parameters (read via self.get_parameter(...).value) ──
         self.declare_parameter('lost_timeout', 5.0)
         self.declare_parameter('goal_rate', 2.0)
         self.declare_parameter('action_timeout', 600.0)
         self.declare_parameter('post_goal_cooldown', 1.0)
+        # Ask for the target again when no seed arrives, then give up. seed_bbox
+        # retries up to 3 frames itself, ~2 s each and up to ~9 s when Cosmos
+        # runs to its token limit, so one request can take most of 30 s.
+        self.declare_parameter('seed_timeout', 30.0)
+        self.declare_parameter('seed_max_requests', 2)
 
         # ── Persistent state ──
         self.last_pose_time = None
         self.last_goal = None
+        # Where this goal's tracking stands: 'reset' until track_3d reports it
+        # stopped, 'seeding' until it reports tracking again, then 'tracking'.
+        self._seed_state = 'tracking'
         self.is_tracking = False
         self._active_goal_handle = None
         self._controller_succeeded = False
@@ -84,8 +94,7 @@ class VisualServoArmNode(Node):
             PoseStamped, self.filtered_pose_topic,
             self._filtered_pose_cb, 5, callback_group=cb_group)
         self.create_subscription(
-            Bool, '/track_3d/is_tracking',
-            lambda msg: setattr(self, 'is_tracking', msg.data),
+            Bool, '/track_3d/is_tracking', self._is_tracking_cb,
             5, callback_group=cb_group)
         self.create_subscription(
             PoseStamped, self.left_ee_pose_topic,
@@ -170,9 +179,9 @@ class VisualServoArmNode(Node):
             self._motion_failure = None
 
         # Reset track3d then initialise with VLM query
-        self._reset_track3d()
-        time.sleep(0.3)
-        self.keyboard_pub.publish(String(data=target))
+        self._request_target(target)
+        seed_requests = 1
+        seed_requested_at = time.monotonic()
 
         start_time = self.get_clock().now().nanoseconds
         result = VisualServoing.Result()
@@ -215,6 +224,29 @@ class VisualServoArmNode(Node):
                     self.last_pose_time = None
                     self._reset_track3d()
                     return result
+
+                # ── No seed yet: ask again, then give up ──
+                if (self.require_seed and self._seed_state != 'tracking'
+                        and time.monotonic() - seed_requested_at
+                        > self.get_parameter('seed_timeout').value):
+                    max_requests = self.get_parameter('seed_max_requests').value
+                    if seed_requests >= max_requests:
+                        self.get_logger().warn(
+                            f'No seed for "{target}" after {seed_requests} '
+                            'request(s) — aborting')
+                        result.success = False
+                        result.message = (
+                            f'No target seed after {seed_requests} request(s)')
+                        self._fill_result(result, self._left_arm)
+                        self._reset_track3d()
+                        goal_handle.abort()
+                        return result
+                    seed_requests += 1
+                    self.get_logger().warn(
+                        f'No seed for "{target}" yet — asking again '
+                        f'({seed_requests}/{max_requests})')
+                    self._request_target(target)
+                    seed_requested_at = time.monotonic()
 
                 with self._motion_lock:
                     motion_failure = self._motion_failure
@@ -417,9 +449,35 @@ class VisualServoArmNode(Node):
         except Exception:
             pass
 
+    def _request_target(self, target):
+        """Reset track3d, then ask for the target by name."""
+        self.last_goal = None
+        self.last_pose_time = None
+        self._seed_state = 'reset'
+        self._reset_track3d()
+        time.sleep(0.3)
+        self.keyboard_pub.publish(String(data=target))
+
     # ── Subscriber callbacks ──
 
+    def _is_tracking_cb(self, msg: Bool):
+        # track_3d reports this every frame. After a request, False means the
+        # reset has landed and True after that means the new seed is tracked.
+        self.is_tracking = msg.data
+        if self._seed_state == 'reset' and not msg.data:
+            self._seed_state = 'seeding'
+        elif self._seed_state == 'seeding' and msg.data:
+            self._seed_state = 'tracking'
+            if self._active_goal_handle is not None:
+                self.get_logger().info('Tracking the new seed; accepting its poses')
+
     def _filtered_pose_cb(self, msg: PoseStamped):
+        # track_3d keeps publishing the previous target until the reset lands,
+        # so on 2026-10-26 a goal whose grounding found nothing moved to the
+        # last target and reported success. Poses count only once track_3d has
+        # stopped and started again from this goal's request.
+        if self.require_seed and self._seed_state != 'tracking':
+            return
         self.last_pose_time = self.get_clock().now().nanoseconds
         self.last_goal = msg
 
