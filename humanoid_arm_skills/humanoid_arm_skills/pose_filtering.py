@@ -3,10 +3,12 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rcl_interfaces.msg import SetParametersResult
 
 from geometry_msgs.msg import Pose2D, PoseStamped, Quaternion
+from std_msgs.msg import Bool
 
 from humanoid_arm_skills.target_kf import TargetKF
 from humanoid_arm_skills.utils import (
@@ -46,6 +48,7 @@ class PoseFilterNode(Node):
         self.add_on_set_parameters_callback(self._validate_parameters)
         self.declare_parameter('tf_timeout', 0.5)
         self.declare_parameter('lost_timeout', 5.0)
+        reset_filter_topic = self.declare_parameter('reset_filter_topic', 'reset_filter').value
 
         # (2) Initialize the estimate and TF listener.
         self.filtered_position = None
@@ -70,6 +73,9 @@ class PoseFilterNode(Node):
         else:
             self.create_subscription(Pose2D, input_topic, self._pose2d_cb, 5)
             self.pub = self.create_publisher(Pose2D, output_topic, 5)
+        self.create_subscription(
+            Bool, reset_filter_topic, self._reset_filter_cb,
+            QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE))
 
         # (4) Report configuration.
         self.get_logger().debug(
@@ -107,6 +113,10 @@ class PoseFilterNode(Node):
                 if not isinstance(value, float) or not np.isfinite(value) or value <= 0.0:
                     return SetParametersResult(successful=False, reason=f'{parameter.name} must be a positive float')
         return SetParametersResult(successful=True)
+
+    def _reset_filter_cb(self, msg):
+        if msg.data:
+            self._reset_filter()
 
     def _reset_filter(self):
         self.filtered_position = None
