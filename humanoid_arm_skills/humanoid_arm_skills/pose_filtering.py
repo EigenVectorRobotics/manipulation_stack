@@ -3,6 +3,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rcl_interfaces.msg import SetParametersResult
 
@@ -47,7 +48,7 @@ class PoseFilterNode(Node):
         self.add_on_set_parameters_callback(self._validate_parameters)
         self.declare_parameter('tf_timeout', 0.5)
         self.declare_parameter('lost_timeout', 5.0)
-        tracking_topic = self.declare_parameter('tracking_topic', '/track_3d/is_tracking').value
+        reset_filter_topic = self.declare_parameter('reset_filter_topic', 'reset_filter').value
 
         # (2) Initialize the estimate and TF listener.
         self.filtered_position = None
@@ -72,14 +73,9 @@ class PoseFilterNode(Node):
         else:
             self.create_subscription(Pose2D, input_topic, self._pose2d_cb, 5)
             self.pub = self.create_publisher(Pose2D, output_topic, 5)
-        # A new target starts a new estimate. Without this the old one survives
-        # a target switch shorter than lost_timeout, the gate rejects the new
-        # target as an outlier, and the old position goes out under new stamps.
-        # track_3d reports False every frame it is not tracking, which also
-        # clears a stale pose that was still in flight when the reset landed.
-        if tracking_topic:
-            self.create_subscription(
-                Bool, tracking_topic, lambda msg: None if msg.data else self._reset_filter(), 5)
+        self.create_subscription(
+            Bool, reset_filter_topic, self._reset_filter_cb,
+            QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE))
 
         # (4) Report configuration.
         self.get_logger().debug(
@@ -117,6 +113,10 @@ class PoseFilterNode(Node):
                 if not isinstance(value, float) or not np.isfinite(value) or value <= 0.0:
                     return SetParametersResult(successful=False, reason=f'{parameter.name} must be a positive float')
         return SetParametersResult(successful=True)
+
+    def _reset_filter_cb(self, msg):
+        if msg.data:
+            self._reset_filter()
 
     def _reset_filter(self):
         self.filtered_position = None

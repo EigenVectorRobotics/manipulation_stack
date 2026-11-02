@@ -15,6 +15,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer, ActionClient, GoalResponse, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool, Empty, String
@@ -55,7 +56,8 @@ class VisualServoArmNode(Node):
         self.move_to_pose_cancel_service = self.declare_parameter(
             'move_to_pose_cancel_service',
             self.move_to_pose_action + '/cancel').value
-        # Only move toward a pose tracked from this goal's own seed.
+        self.reset_filter_topic = self.declare_parameter(
+            'reset_filter_topic', 'reset_filter').value
         self.require_seed = self.declare_parameter('require_seed', True).value
 
         # ── Dynamic parameters (read via self.get_parameter(...).value) ──
@@ -63,17 +65,12 @@ class VisualServoArmNode(Node):
         self.declare_parameter('goal_rate', 2.0)
         self.declare_parameter('action_timeout', 600.0)
         self.declare_parameter('post_goal_cooldown', 1.0)
-        # Ask for the target again when no seed arrives, then give up. seed_bbox
-        # retries up to 3 frames itself, ~2 s each and up to ~9 s when Cosmos
-        # runs to its token limit, so one request can take most of 30 s.
         self.declare_parameter('seed_timeout', 30.0)
         self.declare_parameter('seed_max_requests', 2)
 
         # ── Persistent state ──
         self.last_pose_time = None
         self.last_goal = None
-        # Where this goal's tracking stands: 'reset' until track_3d reports it
-        # stopped, 'seeding' until it reports tracking again, then 'tracking'.
         self._seed_state = 'tracking'
         self.is_tracking = False
         self._active_goal_handle = None
@@ -108,6 +105,9 @@ class VisualServoArmNode(Node):
         # ── Publishers ──
         self.track3d_reset_pub = self.create_publisher(
             Empty, '/track_3d/reset', 5)
+        self.reset_filter_pub = self.create_publisher(
+            Bool, self.reset_filter_topic,
+            QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE))
         self.keyboard_pub = self.create_publisher(
             String, self.keyboard_input_topic, 5)
 
@@ -225,7 +225,6 @@ class VisualServoArmNode(Node):
                     self._reset_track3d()
                     return result
 
-                # ── No seed yet: ask again, then give up ──
                 if (self.require_seed and self._seed_state != 'tracking'
                         and time.monotonic() - seed_requested_at
                         > self.get_parameter('seed_timeout').value):
@@ -450,7 +449,6 @@ class VisualServoArmNode(Node):
             pass
 
     def _request_target(self, target):
-        """Reset track3d, then ask for the target by name."""
         self.last_goal = None
         self.last_pose_time = None
         self._seed_state = 'reset'
@@ -461,9 +459,9 @@ class VisualServoArmNode(Node):
     # ── Subscriber callbacks ──
 
     def _is_tracking_cb(self, msg: Bool):
-        # track_3d reports this every frame. After a request, False means the
-        # reset has landed and True after that means the new seed is tracked.
         self.is_tracking = msg.data
+        if not msg.data:
+            self.reset_filter_pub.publish(Bool(data=True))
         if self._seed_state == 'reset' and not msg.data:
             self._seed_state = 'seeding'
         elif self._seed_state == 'seeding' and msg.data:
@@ -472,10 +470,6 @@ class VisualServoArmNode(Node):
                 self.get_logger().info('Tracking the new seed; accepting its poses')
 
     def _filtered_pose_cb(self, msg: PoseStamped):
-        # track_3d keeps publishing the previous target until the reset lands,
-        # so on 2026-10-26 a goal whose grounding found nothing moved to the
-        # last target and reported success. Poses count only once track_3d has
-        # stopped and started again from this goal's request.
         if self.require_seed and self._seed_state != 'tracking':
             return
         self.last_pose_time = self.get_clock().now().nanoseconds
