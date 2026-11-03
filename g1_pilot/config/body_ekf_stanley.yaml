@@ -41,4 +41,4 @@ body_ekf:
 
     # Startup still period
     calibration_duration: 2.0
-    still_threshold: 0.15
+    still_threshold: 0.3
