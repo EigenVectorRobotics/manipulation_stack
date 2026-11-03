@@ -156,29 +156,25 @@ TEST(BodyEKF, WaistAndLegUpdatesEnforceEncoderRelations) {
     EXPECT_LT(angle_deg(f.R_p, R_p), 0.05);
 }
 
-TEST(BodyEKF, JointCorrectionAppliesGainThenOffsetByName) {
+TEST(BodyEKF, JointCorrectionAppliesGainByName) {
     const JointState state = joint_state({0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.13, 0.14, 0.09});
-    const JointState c = correct_joints(state, {{"waist_roll_joint", 0.1}},
-                                        {{"waist_roll_joint", 2.0}, {"waist_pitch_joint", 1.5}});
-    EXPECT_NEAR(c.position[7], 2.0 * 0.13 + 0.1, 1e-12);
+    const JointState c = correct_joints(state, {{"waist_roll_joint", 2.0}, {"waist_pitch_joint", 1.5}});
+    EXPECT_NEAR(c.position[7], 2.0 * 0.13, 1e-12);
     EXPECT_NEAR(c.position[8], 1.5 * 0.14, 1e-12);
     EXPECT_NEAR(c.position[3], 0.03, 1e-12);
 }
 
 TEST(BodyEKF, BodyConfigsParse) {
     const BodyConfig stanley = make_body_config(
-        {0.081099, 0.023467, 0.414921}, {1.3, 3.4, -1.592365}, {},
-        {"left_ankle_pitch_joint", "left_ankle_roll_joint"}, {12.56, 14.36}, {}, {});
-    EXPECT_NEAR(stanley.joint_offsets.at("left_ankle_pitch_joint"), 12.56 * DEG, 1e-12);
-    EXPECT_NEAR(stanley.joint_offsets.at("left_ankle_roll_joint"), 14.36 * DEG, 1e-12);
+        {0.081099, 0.023467, 0.414921}, {1.3, 3.4, -1.592365}, {}, {}, {});
     EXPECT_TRUE(stanley.joint_gains.empty());
     EXPECT_NEAR(stanley.T_torso_camera_link(2, 3), 0.414921, 1e-12);
     const BodyConfig patricia = make_body_config(
-        {0.05762, 0.01753, 0.42987}, {}, {0.0, 0.40355, 0.0, 0.91496}, {}, {},
+        {0.05762, 0.01753, 0.42987}, {}, {0.0, 0.40355, 0.0, 0.91496},
         {"waist_roll_joint", "waist_pitch_joint"}, {1.327, 1.122});
     EXPECT_DOUBLE_EQ(patricia.joint_gains.at("waist_roll_joint"), 1.327);
     EXPECT_LT(angle_deg(patricia.T_torso_camera_link.topLeftCorner<3, 3>(), rpy_matrix(0.0, 47.6 * DEG, 0.0)), 0.01);
-    EXPECT_THROW(make_body_config({}, {}, {}, {}, {}, {"waist_roll_joint"}, {}), std::invalid_argument);
+    EXPECT_THROW(make_body_config({}, {}, {}, {"waist_roll_joint"}, {}), std::invalid_argument);
 }
 
 TEST(BodyEKF, HumanoidFrameTransformMatchesKnownPoses) {
@@ -197,7 +193,7 @@ TEST(BodyEKF, HumanoidFrameTransformMatchesKnownPoses) {
 
 TEST(BodyEKF, RelationsComposeToFootTorso) {
     BodyConfig robot;
-    robot.joint_offsets = {{"left_ankle_pitch_joint", 0.2}};
+    robot.joint_gains = {{"waist_roll_joint", 1.2}};
     BodyAttitudeEstimator estimator(humanoid(), robot, Eigen::Matrix3d::Identity());
     std::mt19937 rng(3);
     for (int k = 0; k < 5; ++k) {

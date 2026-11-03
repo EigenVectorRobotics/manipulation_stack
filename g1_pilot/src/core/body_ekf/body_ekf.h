@@ -76,28 +76,24 @@ private:
 
 struct BodyConfig {
     Eigen::Matrix4d T_torso_camera_link = Eigen::Matrix4d::Identity();
-    std::map<std::string, double> joint_offsets;
     std::map<std::string, double> joint_gains;
     std::string base_link = "pelvis";
     std::string torso_link = "torso_link";
     std::string foot_link = "left_ankle_roll_link";
 };
 
-// Camera rotation from the quaternion when it has 4 values, else from rpy (deg); offsets in deg.
+// Camera rotation from the quaternion when it has 4 values, else from rpy (deg).
 BodyConfig make_body_config(
     const std::vector<double>& camera_mount_xyz,
     const std::vector<double>& camera_mount_rpy_deg,
     const std::vector<double>& camera_mount_quat_xyzw,
-    const std::vector<std::string>& joint_offset_names,
-    const std::vector<double>& joint_offset_deg,
     const std::vector<std::string>& joint_gain_names,
     const std::vector<double>& joint_gain_values
 );
 
-// q_true = gain * q + offset, by joint name.
+// q_true = gain * q, by joint name; encoder offsets are applied upstream by unitree_interface.
 JointState correct_joints(
     const JointState& state,
-    const std::map<std::string, double>& offsets,
     const std::map<std::string, double>& gains
 );
 

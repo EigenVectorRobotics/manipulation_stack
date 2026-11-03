@@ -83,8 +83,7 @@ std::unique_ptr<BodyAttitudeEstimator> make_estimator(
     cfg.asset_root = asset_root;
     cfg.asset_file = asset_root + "/g1_29dof_with_hand_rev_1_0.urdf";
     cfg.config_file = config_file;
-    const BodyConfig robot = make_body_config({}, {}, {}, strings(meta, "joint_offset_names"),
-                                              numbers(meta, "joint_offset_deg"), strings(meta, "joint_gain_names"),
+    const BodyConfig robot = make_body_config({}, {}, {}, strings(meta, "joint_gain_names"),
                                               numbers(meta, "joint_gain_values"));
     EKFParams params;
     const auto densities = numbers(meta, "gyro_densities");

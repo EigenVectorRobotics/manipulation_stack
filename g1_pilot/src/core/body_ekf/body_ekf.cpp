@@ -276,8 +276,6 @@ BodyConfig make_body_config(
     const std::vector<double>& camera_mount_xyz,
     const std::vector<double>& camera_mount_rpy_deg,
     const std::vector<double>& camera_mount_quat_xyzw,
-    const std::vector<std::string>& joint_offset_names,
-    const std::vector<double>& joint_offset_deg,
     const std::vector<std::string>& joint_gain_names,
     const std::vector<double>& joint_gain_values
 ){
@@ -296,23 +294,19 @@ BodyConfig make_body_config(
             Eigen::Vector3d(camera_mount_xyz[0], camera_mount_xyz[1], camera_mount_xyz[2]);
     }
 
-    // (2) Encoder corrections.
-    robot.joint_offsets = joint_map(joint_offset_names, joint_offset_deg, DEG);
+    // (2) Encoder gains.
     robot.joint_gains = joint_map(joint_gain_names, joint_gain_values, 1.0);
     return robot;
 }
 
 JointState correct_joints(
     const JointState& state,
-    const std::map<std::string, double>& offsets,
     const std::map<std::string, double>& gains
 ){
     JointState out = state;
     for (std::size_t i = 0; i < out.name.size(); ++i) {
         const auto gain = gains.find(out.name[i]);
-        const auto offset = offsets.find(out.name[i]);
-        out.position[i] = out.position[i] * (gain != gains.end() ? gain->second : 1.0)
-                        + (offset != offsets.end() ? offset->second : 0.0);
+        if (gain != gains.end()) out.position[i] *= gain->second;
     }
     return out;
 }
@@ -326,7 +320,7 @@ BodyAttitudeEstimator::BodyAttitudeEstimator(
 { }
 
 Relations BodyAttitudeEstimator::relations(const JointState& joints) {
-    const JointState corrected = correct_joints(joints, robot_.joint_offsets, robot_.joint_gains);
+    const JointState corrected = correct_joints(joints, robot_.joint_gains);
     const Eigen::Matrix4d T_base_torso = humanoid_->frame_transform(corrected, robot_.base_link, robot_.torso_link);
     const Eigen::Matrix4d T_foot_base =
         humanoid_->frame_transform(corrected, robot_.foot_link, robot_.base_link);

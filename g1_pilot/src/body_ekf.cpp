@@ -126,8 +126,6 @@ private:
             this->declare_parameter<Doubles>("camera_mount_xyz", Doubles{0.0, 0.0, 0.0}),
             this->declare_parameter<Doubles>("camera_mount_rpy_deg", Doubles{0.0, 0.0, 0.0}),
             this->declare_parameter<Doubles>("camera_mount_quat_xyzw", Doubles{}),
-            this->declare_parameter<Strings>("joint_offset_names", Strings{}),
-            this->declare_parameter<Doubles>("joint_offset_deg", Doubles{}),
             this->declare_parameter<Strings>("joint_gain_names", Strings{}),
             this->declare_parameter<Doubles>("joint_gain_values", Doubles{}));
     }
