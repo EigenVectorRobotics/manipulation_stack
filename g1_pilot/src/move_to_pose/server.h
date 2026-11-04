@@ -76,8 +76,12 @@ private:
     void monitor_(const std::shared_ptr<GoalHandle> & goal);
     bool report_progress_(const std::shared_ptr<GoalHandle> & goal);
     Plan plan_(const JointState & start, const Eigen::MatrixXd & target, bool left, bool replan);
+    Plan to_plan_(const HumanoidPilot::JointTrajectory & planned, bool left);
     void try_replan_(const std::shared_ptr<GoalHandle> & goal);
     Eigen::MatrixXd replan_target_();
+    void start_stepping_(const JointState & state, const Eigen::MatrixXd & target);
+    void step_final_leg_(const std::shared_ptr<GoalHandle> & goal);
+    Eigen::Matrix4d pelvis_from_anchor_(const JointState & state);
     Eigen::MatrixXd to_pelvis_frame_(const PoseStamped & pose);
     Eigen::MatrixXd pelvis_to_planning_frame_();
     void publish_path_(const std::vector<Eigen::MatrixXd> & pelvis_path);
@@ -137,6 +141,12 @@ private:
     std::string planned_source_frame_;
     double lock_time_ = -1.0;
     bool final_leg_refreshed_ = false;
+    bool hold_between_steps_ = false;
+
+    // Final-leg stepping (worker only): the goal frozen in the foot frame, re-mapped into the pelvis before every step
+    bool stepping_ = false;
+    std::size_t leg_step_ = 0;
+    Eigen::Matrix4d goal_in_anchor_ = Eigen::Matrix4d::Identity();
 
     // target_mutex_ protects the target stream independently of control and goals.
     std::mutex target_mutex_;

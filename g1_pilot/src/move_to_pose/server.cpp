@@ -70,6 +70,8 @@ void MoveToPoseServer::declare_parameters_()
     declare_parameter<double>("arm_safety_distance_x", 0.0);
     declare_parameter<double>("arm_safety_distance_y", 0.0);
     declare_parameter<double>("arm_safety_distance_z", 0.0);
+    declare_parameter<bool>("final_leg_stepping", true);
+    declare_parameter<std::string>("final_leg_anchor_frame", "left_ankle_roll_link");
     frame_ = get_parameter("planning_frame").as_string();
     control_period_ = get_parameter("control_period").as_double();
 }

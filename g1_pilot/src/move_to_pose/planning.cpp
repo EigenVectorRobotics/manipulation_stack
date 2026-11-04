@@ -63,7 +63,10 @@ void MoveToPoseServer::run_(const std::shared_ptr<GoalHandle> & goal)
         planned_source_ = source.matrix();
         planned_source_frame_ = request->target_pose.header.frame_id;
         final_leg_refreshed_ = false;
+        hold_between_steps_ = false;
     }
+    stepping_ = false;
+    leg_step_ = 0;
     const auto status = install_(goal, plan.trajectory, target, plan.lock_time);
     if (status != GoalStatus::Active) {
         finish_(goal, false, 0.0, status == GoalStatus::Cancelled
@@ -82,9 +85,13 @@ MoveToPoseServer::Plan MoveToPoseServer::plan_(
     const double dt = get_parameter("plan_time_step").as_double();
     const double velocity = get_parameter("max_joint_vel").as_double();
     const double acceleration = get_parameter("max_joint_acc").as_double();
-    const auto planned = replan
+    return to_plan_(replan
         ? planner_->replanTrajectory(start, target, dt, velocity, acceleration)
-        : planner_->planTrajectory(start, target, dt, velocity, acceleration);
+        : planner_->planTrajectory(start, target, dt, velocity, acceleration), left);
+}
+
+MoveToPoseServer::Plan MoveToPoseServer::to_plan_(const HumanoidPilot::JointTrajectory & planned, bool left)
+{
     const auto configs = toJointConfigs(planned);
     if (configs.empty()) throw std::runtime_error("empty trajectory");
     Plan result;
@@ -147,6 +154,10 @@ Eigen::MatrixXd MoveToPoseServer::replan_target_()
         final_leg_refreshed_ = true;
         planned_source_ = source;
         planned_source_frame_ = update.header.frame_id;
+        if (get_parameter("final_leg_stepping").as_bool()) {
+            start_stepping_(state_, target);
+            return {};
+        }
         RCLCPP_INFO(get_logger(), "Refreshing the final leg against the latest target");
         return target;
     }
@@ -170,6 +181,62 @@ Eigen::MatrixXd MoveToPoseServer::replan_target_()
     return {};
 }
 
+void MoveToPoseServer::start_stepping_(const JointState & state, const Eigen::MatrixXd & target)
+{
+    // The goal is frozen in the foot frame, which stays put while the pelvis leans with the reaching arm.
+    goal_in_anchor_ = pelvis_from_anchor_(state).inverse() * Eigen::Matrix4d(target);
+    stepping_ = true;
+    leg_step_ = 1;
+    RCLCPP_INFO(get_logger(), "Stepping the final leg against the target fixed in %s",
+                get_parameter("final_leg_anchor_frame").as_string().c_str());
+}
+
+void MoveToPoseServer::step_final_leg_(const std::shared_ptr<GoalHandle> & goal)
+{
+    // (1) Plan the next step only once the previous one is held at rest.
+    if (leg_step_ == 0) return;
+    {
+        std::lock_guard<std::mutex> lock(ctrl_mutex_);
+        if (leg_step_ > 1 && mode_ != ControlMode::Holding) return;
+    }
+    JointState start;
+    if (!stop_for_replan_(goal, start)) return;
+
+    // (2) Re-map the frozen goal into the current pelvis; a last pass repeats the goal step, then holds and retreats.
+    const Eigen::Matrix4d target = pelvis_from_anchor_(start) * goal_in_anchor_;
+    const std::size_t n = planner_->finalLegSize();
+    const bool last = leg_step_ >= n;
+    const std::size_t step = std::min(leg_step_, n - 1);
+    Plan plan;
+    try {
+        planner_->setLeftArm(goal->get_goal()->left_arm);
+        plan = to_plan_(planner_->planFinalLegStep(
+            start, target, step, last, get_parameter("plan_time_step").as_double(),
+            get_parameter("max_joint_vel").as_double(), get_parameter("max_joint_acc").as_double()),
+            goal->get_goal()->left_arm);
+    } catch (const std::exception & e) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+            "Final-leg step %zu failed: %s; holding position", leg_step_, e.what());
+        return;
+    }
+
+    // (3) Hold at the end of every step but the last, which completes the goal after its retreat.
+    {
+        std::lock_guard<std::mutex> lock(ctrl_mutex_);
+        hold_between_steps_ = !last;
+    }
+    if (install_(goal, plan.trajectory, target, -1.0) != GoalStatus::Active) return;
+    publish_path_(plan.path);
+    RCLCPP_INFO(get_logger(), "Final-leg step %zu/%zu to [%.3f %.3f %.3f]",
+                leg_step_, n, target(0, 3), target(1, 3), target(2, 3));
+    leg_step_ = last ? 0 : leg_step_ + 1;
+}
+
+Eigen::Matrix4d MoveToPoseServer::pelvis_from_anchor_(const JointState & state)
+{
+    return planner_->frame_transform(state, "pelvis", get_parameter("final_leg_anchor_frame").as_string());
+}
+
 void MoveToPoseServer::monitor_(const std::shared_ptr<GoalHandle> & goal)
 {
     // (1) Monitor ownership, replanning, and control progress.
@@ -183,7 +250,8 @@ void MoveToPoseServer::monitor_(const std::shared_ptr<GoalHandle> & goal)
                 ? "Cancelled" : "Preempted by a newer goal");
             return;
         }
-        try_replan_(goal);
+        if (stepping_) step_final_leg_(goal);
+        else try_replan_(goal);
         if (goal_status_(goal) != GoalStatus::Active) continue;
         if (report_progress_(goal)) return;
         std::unique_lock<std::mutex> lock(goal_mutex_);

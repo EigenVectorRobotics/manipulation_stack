@@ -157,6 +157,8 @@ void MoveToPoseServer::complete_trajectory_locked_()
 {
     if (mode_ == ControlMode::Braking && hold_endpoint_locked_()) {
         RCLCPP_INFO(get_logger(), "Braking complete; holding endpoint for replanning");
+    } else if (hold_between_steps_ && hold_endpoint_locked_()) {
+        RCLCPP_INFO(get_logger(), "Final-leg step reached; holding for the next step");
     } else {
         ++idx_;
         mode_ = ControlMode::Complete;

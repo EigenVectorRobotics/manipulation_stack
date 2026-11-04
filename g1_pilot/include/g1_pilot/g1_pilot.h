@@ -167,6 +167,19 @@ public:
         double max_joint_acc = 2.0
     );
 
+    JointTrajectory
+    planFinalLegStep(
+        const JointState& start_state,
+        const Eigen::MatrixXd& goal_pose,
+        std::size_t step,
+        bool retreat,
+        double time_step = 0.01,
+        double max_joint_vel = 1.0,
+        double max_joint_acc = 2.0
+    );
+
+    std::size_t finalLegSize() const;
+
     JointTrajectory brake(
         const JointState& state,
         double time_step = 0.01,

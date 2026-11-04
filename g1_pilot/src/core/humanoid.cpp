@@ -413,6 +413,26 @@ Humanoid::replanTrajectory(
     );
 }
 
+JointTrajectory
+Humanoid::planFinalLegStep(
+    const JointState& start_state,
+    const Eigen::MatrixXd& goal_pose,
+    std::size_t step,
+    bool retreat,
+    double time_step,
+    double max_joint_vel,
+    double max_joint_acc
+){
+    return impl_->motion_planner->planFinalLegStep(
+        start_state, goal_pose, step, retreat,
+        time_step, max_joint_vel, max_joint_acc
+    );
+}
+
+std::size_t Humanoid::finalLegSize() const {
+    return impl_->motion_planner->finalLegSize();
+}
+
 JointTrajectory Humanoid::brake(
     const JointState& state,
     double time_step,

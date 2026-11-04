@@ -193,6 +193,39 @@ JointTrajectory VisualServoPlanner::appendRetreat(
     return concatenateTrajectories(std::move(traj), retreat_traj, GOAL_DELAY);
 }
 
+JointTrajectory
+VisualServoPlanner::planFinalLegStep(
+    const JointState& start_state,
+    const Eigen::MatrixXd& goal_pose,
+    std::size_t step,
+    bool retreat,
+    double time_step,
+    double max_joint_vel,
+    double max_joint_acc
+) {
+    if (step == 0 || step >= final_leg_.size()) {
+        throw std::out_of_range("VisualServoPlanner::planFinalLegStep: step outside the final leg");
+    }
+    setWall(goal_pose);
+    Eigen::VectorXd start_q;
+    std::tie(start_q, std::ignore, std::ignore) = jointstate_to_vectors(start_state, model_);
+    start_q = start_q.cwiseMax(model_.lowerPositionLimit).cwiseMin(model_.upperPositionLimit);
+
+    // The start configuration seeds the IK so the step stays on the current branch.
+    const JointState seed = vectors_to_jointstate(
+        start_q, Eigen::VectorXd::Zero(model_.nv), Eigen::VectorXd::Zero(model_.nv), model_);
+    const bool at_goal = step + 1 == final_leg_.size();
+    const JointState js = poseToJointConfig(
+        goal_pose * final_leg_[step], at_goal ? GOAL_REFINEMENT_PASSES : 1, &seed, true);
+    if (js.position.size() == 0) return {};
+    Eigen::VectorXd step_q;
+    std::tie(step_q, std::ignore, std::ignore) = jointstate_to_vectors(js, model_);
+
+    JointTrajectory traj = timeParameterize({start_q, step_q}, time_step, max_joint_vel/2, max_joint_acc/4);
+    if (retreat) traj = appendRetreat(std::move(traj), step_q, goal_pose, time_step, max_joint_vel/2, max_joint_acc/4);
+    return traj;
+}
+
 std::pair<
 std::vector<Eigen::VectorXd>,
 std::vector<Eigen::MatrixXd>>

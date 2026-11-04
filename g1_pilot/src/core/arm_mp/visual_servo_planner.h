@@ -12,7 +12,7 @@ class VisualServoPlanner : public JointSpacePlanner {
             std::shared_ptr<HumanoidIK> ik_handle,
             bool left_arm = false,
             double approach_offset = 0.10,
-            int final_leg_steps = 8,
+            int final_leg_steps = 4,
             double step_size = 0.05,
             double goal_bias = 0.1,
             double rewire_factor = 1.1,
@@ -51,6 +51,19 @@ class VisualServoPlanner : public JointSpacePlanner {
             double max_joint_vel = 1.0,
             double max_joint_acc = 2.0
         );
+
+        JointTrajectory
+        planFinalLegStep(
+            const JointState& start_state,
+            const Eigen::MatrixXd& goal_pose,
+            std::size_t step,
+            bool retreat,
+            double time_step = 0.01,
+            double max_joint_vel = 1.0,
+            double max_joint_acc = 2.0
+        );
+
+        std::size_t finalLegSize() const { return final_leg_.size(); }
 
     protected:
         std::vector<Eigen::Matrix4d> linearInterpolate(
