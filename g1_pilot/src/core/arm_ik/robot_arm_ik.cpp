@@ -167,11 +167,11 @@ void HumanoidIK::filter_adjacent_collision_pairs() {
 }
 
 void HumanoidIK::convexify_collision_geometry() {
-    // Mesh-mesh contacts report only where triangles cross, so a buried link reads a few mm; hulls give true depth.
+    // Collision meshes are stored convex hulls; wrapped as convexes, they report true penetration depth.
     for (auto& object : geom_model_.geometryObjects) {
         auto mesh = std::dynamic_pointer_cast<coal::BVHModelBase>(object.geometry);
         if (!mesh) continue;
-        mesh->buildConvexHull(false, "Qt");
+        mesh->buildConvexRepresentation(false);
         object.geometry = mesh->convex;
         object.geometry->computeLocalAABB();
     }
