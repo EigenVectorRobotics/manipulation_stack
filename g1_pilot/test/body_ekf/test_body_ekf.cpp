@@ -156,25 +156,11 @@ TEST(BodyEKF, WaistAndLegUpdatesEnforceEncoderRelations) {
     EXPECT_LT(angle_deg(f.R_p, R_p), 0.05);
 }
 
-TEST(BodyEKF, JointCorrectionAppliesGainByName) {
-    const JointState state = joint_state({0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.13, 0.14, 0.09});
-    const JointState c = correct_joints(state, {{"waist_roll_joint", 2.0}, {"waist_pitch_joint", 1.5}});
-    EXPECT_NEAR(c.position[7], 2.0 * 0.13, 1e-12);
-    EXPECT_NEAR(c.position[8], 1.5 * 0.14, 1e-12);
-    EXPECT_NEAR(c.position[3], 0.03, 1e-12);
-}
-
 TEST(BodyEKF, BodyConfigsParse) {
-    const BodyConfig stanley = make_body_config(
-        {0.081099, 0.023467, 0.414921}, {1.3, 3.4, -1.592365}, {}, {}, {});
-    EXPECT_TRUE(stanley.joint_gains.empty());
+    const BodyConfig stanley = make_body_config({0.081099, 0.023467, 0.414921}, {1.3, 3.4, -1.592365}, {});
     EXPECT_NEAR(stanley.T_torso_camera_link(2, 3), 0.414921, 1e-12);
-    const BodyConfig patricia = make_body_config(
-        {0.05762, 0.01753, 0.42987}, {}, {0.0, 0.40355, 0.0, 0.91496},
-        {"waist_roll_joint", "waist_pitch_joint"}, {1.327, 1.122});
-    EXPECT_DOUBLE_EQ(patricia.joint_gains.at("waist_roll_joint"), 1.327);
+    const BodyConfig patricia = make_body_config({0.05762, 0.01753, 0.42987}, {}, {0.0, 0.40355, 0.0, 0.91496});
     EXPECT_LT(angle_deg(patricia.T_torso_camera_link.topLeftCorner<3, 3>(), rpy_matrix(0.0, 47.6 * DEG, 0.0)), 0.01);
-    EXPECT_THROW(make_body_config({}, {}, {}, {"waist_roll_joint"}, {}), std::invalid_argument);
 }
 
 TEST(BodyEKF, HumanoidFrameTransformMatchesKnownPoses) {
@@ -192,9 +178,7 @@ TEST(BodyEKF, HumanoidFrameTransformMatchesKnownPoses) {
 }
 
 TEST(BodyEKF, RelationsComposeToFootTorso) {
-    BodyConfig robot;
-    robot.joint_gains = {{"waist_roll_joint", 1.2}};
-    BodyAttitudeEstimator estimator(humanoid(), robot, Eigen::Matrix3d::Identity());
+    BodyAttitudeEstimator estimator(humanoid(), BodyConfig(), Eigen::Matrix3d::Identity());
     std::mt19937 rng(3);
     for (int k = 0; k < 5; ++k) {
         const Relations rel = estimator.relations(random_joints(rng, 0.3));
@@ -275,7 +259,7 @@ StillRun run_still_robot(bool use_camera_imu) {
         online.add_imu(Body::Pelvis, t, bias + jitter(2e-3), R_p.transpose() * EZ * 9.81 + jitter(0.02));
         online.add_imu(Body::Torso, t, bias + jitter(2e-3), R_t.transpose() * EZ * 9.81 + jitter(0.02));
         if (ms % 5 == 0) {
-            online.add_camera_imu(t, bias + jitter(2e-3), R_t.transpose() * EZ * 9.81 + jitter(0.02));
+            online.add_imu(Body::Camera, t, bias + jitter(2e-3), R_t.transpose() * EZ * 9.81 + jitter(0.02));
         }
         const ProcessReport report = online.process();
         run.calibrated = run.calibrated || report.calibrated;
@@ -292,7 +276,7 @@ TEST(BodyEKF, OnlineEstimatorTracksStaticRobot) {
         EXPECT_LT(angle_deg(run.outputs.back().T_foot_torso.topLeftCorner<3, 3>(), run.rel.L * run.rel.W), 0.5);
         EXPECT_TRUE((run.outputs.back().T_foot_torso.topRightCorner<3, 1>().isApprox(
             run.rel.T_foot_torso.topRightCorner<3, 1>(), 1e-12)));
-        // Camera-IMU stamps and the torso-only grid both step every 5 ms.
+        // The torso-IMU grid steps every 5 ms with and without the camera IMU.
         for (std::size_t k = 1; k < run.outputs.size(); ++k) {
             EXPECT_EQ(run.outputs[k].t - run.outputs[k - 1].t, 5000000);
         }

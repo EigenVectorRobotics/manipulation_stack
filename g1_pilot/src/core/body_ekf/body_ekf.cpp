@@ -62,21 +62,6 @@ Eigen::Vector3d mean_vector(const std::vector<Eigen::Vector3d>& x) {
     return sum / static_cast<double>(x.size());
 }
 
-std::map<std::string, double> joint_map(
-    const std::vector<std::string>& names,
-    const std::vector<double>& values,
-    double scale
-){
-    if (names.size() != values.size()) {
-        throw std::invalid_argument("Robot config: joint names and values differ in length");
-    }
-    std::map<std::string, double> out;
-    for (std::size_t i = 0; i < names.size(); ++i) {
-        out[names[i]] = values[i] * scale;
-    }
-    return out;
-}
-
 double gyro_density(const std::vector<Eigen::Vector3d>& gyro, double given, double fallback, double grid_period) {
     if (given > 0.0) {
         return given;
@@ -275,11 +260,9 @@ void Body2EKF::leg(const Eigen::Matrix3d& L, double sig_tilt, double sig_yaw) {
 BodyConfig make_body_config(
     const std::vector<double>& camera_mount_xyz,
     const std::vector<double>& camera_mount_rpy_deg,
-    const std::vector<double>& camera_mount_quat_xyzw,
-    const std::vector<std::string>& joint_gain_names,
-    const std::vector<double>& joint_gain_values
+    const std::vector<double>& camera_mount_quat_xyzw
 ){
-    // (1) Camera mount: torso_link <- camera_link.
+    // Camera mount: torso_link <- camera_link.
     const auto& q = camera_mount_quat_xyzw;
     const auto& rpy = camera_mount_rpy_deg;
     BodyConfig robot;
@@ -293,22 +276,7 @@ BodyConfig make_body_config(
         robot.T_torso_camera_link.topRightCorner<3, 1>() =
             Eigen::Vector3d(camera_mount_xyz[0], camera_mount_xyz[1], camera_mount_xyz[2]);
     }
-
-    // (2) Encoder gains.
-    robot.joint_gains = joint_map(joint_gain_names, joint_gain_values, 1.0);
     return robot;
-}
-
-JointState correct_joints(
-    const JointState& state,
-    const std::map<std::string, double>& gains
-){
-    JointState out = state;
-    for (std::size_t i = 0; i < out.name.size(); ++i) {
-        const auto gain = gains.find(out.name[i]);
-        if (gain != gains.end()) out.position[i] *= gain->second;
-    }
-    return out;
 }
 
 BodyAttitudeEstimator::BodyAttitudeEstimator(
@@ -320,10 +288,8 @@ BodyAttitudeEstimator::BodyAttitudeEstimator(
 { }
 
 Relations BodyAttitudeEstimator::relations(const JointState& joints) {
-    const JointState corrected = correct_joints(joints, robot_.joint_gains);
-    const Eigen::Matrix4d T_base_torso = humanoid_->frame_transform(corrected, robot_.base_link, robot_.torso_link);
-    const Eigen::Matrix4d T_foot_base =
-        humanoid_->frame_transform(corrected, robot_.foot_link, robot_.base_link);
+    const Eigen::Matrix4d T_base_torso = humanoid_->frame_transform(joints, robot_.base_link, robot_.torso_link);
+    const Eigen::Matrix4d T_foot_base = humanoid_->frame_transform(joints, robot_.foot_link, robot_.base_link);
     return {T_base_torso.topLeftCorner<3, 3>(), T_foot_base.topLeftCorner<3, 3>(), T_foot_base * T_base_torso};
 }
 
@@ -522,21 +488,14 @@ void OnlineBodyEstimator::add_joint_state(int64_t t, const JointState& state) {
 }
 
 void OnlineBodyEstimator::add_imu(Body body, int64_t t, const Eigen::Vector3d& gyro, const Eigen::Vector3d& acc) {
-    Eigen::VectorXd row(6);
-    row << gyro, acc;
-    (body == Body::Pelvis ? pelvis_ : torso_).append(t, row);
-    if (body == Body::Torso && !estimator_->params().use_camera_imu) {
-        queue_grid(t);
-    }
-}
-
-void OnlineBodyEstimator::add_camera_imu(int64_t t, const Eigen::Vector3d& gyro, const Eigen::Vector3d& acc) {
-    if (!estimator_->params().use_camera_imu) {
+    if (body == Body::Camera && !estimator_->params().use_camera_imu) {
         return;
     }
-    pending_.push_back({t, gyro, acc});
-    if (pending_.size() > MAX_PENDING_IMU) {
-        pending_.pop_front();
+    Eigen::VectorXd row(6);
+    row << gyro, acc;
+    (body == Body::Pelvis ? pelvis_ : body == Body::Torso ? torso_ : camera_).append(t, row);
+    if (body == Body::Torso) {
+        queue_grid(t);
     }
 }
 
@@ -547,7 +506,7 @@ void OnlineBodyEstimator::queue_grid(int64_t t) {
         next_grid_ = t + period;
     }
     for (; *next_grid_ <= t; *next_grid_ += period) {
-        pending_.push_back({*next_grid_, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()});
+        pending_.push_back(*next_grid_);
     }
     while (pending_.size() > MAX_PENDING_IMU) {
         pending_.pop_front();
@@ -555,36 +514,41 @@ void OnlineBodyEstimator::queue_grid(int64_t t) {
 }
 
 OnlineBodyEstimator::Stamp OnlineBodyEstimator::classify(int64_t t, ProcessReport& report) const {
-    if (joints_.covers(t, window_) && pelvis_.covers(t, window_) && torso_.covers(t, window_)) {
+    const bool camera = estimator_->params().use_camera_imu;
+    if (joints_.covers(t, window_) && pelvis_.covers(t, window_) && torso_.covers(t, window_) &&
+        (!camera || camera_.covers(t, window_))) {
         return Stamp::Ready;
     }
     int64_t oldest = std::numeric_limits<int64_t>::min();
-    for (const SampleBuffer* buffer : {&joints_, &pelvis_, &torso_}) {
+    for (const SampleBuffer* buffer : {&joints_, &pelvis_, &torso_, &camera_}) {
         if (!buffer->empty()) oldest = std::max(oldest, buffer->oldest());
     }
     if (t <= oldest) {
         return Stamp::Stale;
     }
-    if (!joints_.empty() && t > joints_.latest() + CAMERA_AHEAD_NS) {
+    if (camera && !camera_.empty() && !joints_.empty() && camera_.latest() > joints_.latest() + CAMERA_AHEAD_NS) {
         report.camera_ahead = true;
     }
     return Stamp::Wait;
 }
 
-GridSample OnlineBodyEstimator::resample(const PendingImu& imu, double& joint_speed) const {
-    // (1) IMUs boxcar-averaged, joints interpolated at the camera-IMU stamp.
-    const Eigen::VectorXd pelvis = pelvis_.boxcar(imu.t, window_);
-    const Eigen::VectorXd torso = torso_.boxcar(imu.t, window_);
-    const Eigen::VectorXd joints = joints_.interp(imu.t);
+GridSample OnlineBodyEstimator::resample(int64_t t, double& joint_speed) const {
+    // (1) IMUs boxcar-averaged, joints interpolated at the grid stamp.
+    const Eigen::VectorXd pelvis = pelvis_.boxcar(t, window_);
+    const Eigen::VectorXd torso = torso_.boxcar(t, window_);
+    const Eigen::VectorXd joints = joints_.interp(t);
     const std::size_t n = joint_names_.size();
     GridSample sample;
-    sample.t = imu.t;
+    sample.t = t;
     sample.gyro_p = pelvis.head<3>();
     sample.acc_p = pelvis.tail<3>();
     sample.gyro_t = torso.head<3>();
     sample.acc_t = torso.tail<3>();
-    sample.gyro_s = imu.gyro;
-    sample.acc_s = imu.acc;
+    if (estimator_->params().use_camera_imu) {
+        const Eigen::VectorXd camera = camera_.boxcar(t, window_);
+        sample.gyro_s = camera.head<3>();
+        sample.acc_s = camera.tail<3>();
+    }
     sample.joints.name = joint_names_;
     sample.joints.position.assign(joints.data(), joints.data() + n);
 
@@ -599,18 +563,18 @@ GridSample OnlineBodyEstimator::resample(const PendingImu& imu, double& joint_sp
 ProcessReport OnlineBodyEstimator::process() {
     ProcessReport report;
     while (!pending_.empty()) {
-        const Stamp stamp = classify(pending_.front().t, report);
+        const Stamp stamp = classify(pending_.front(), report);
         if (stamp == Stamp::Wait) {
             break;
         }
-        const PendingImu imu = pending_.front();
+        const int64_t t = pending_.front();
         pending_.pop_front();
         if (stamp == Stamp::Stale) {
             ++report.dropped;
             continue;
         }
         double joint_speed = 0.0;
-        const GridSample sample = resample(imu, joint_speed);
+        const GridSample sample = resample(t, joint_speed);
         if (estimator_->initialized()) {
             report.outputs.push_back({sample.t, estimator_->step(sample)});
         } else if (collector_.add(sample, joint_speed)) {

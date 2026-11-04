@@ -31,15 +31,19 @@ class BodyEKFNode : public rclcpp::Node
 {
 public:
     BodyEKFNode() : Node("body_ekf")
-    {
+    {   
+        auto string_param = [this](std::string& var, std::string param, std::string default_val){
+            var = this->declare_parameter<std::string>(param, default_val);
+        };
+
         // (1) Humanoid model, robot configuration and noise.
         std::string description_share = ament_index_cpp::get_package_share_directory("g1_description");
         std::string g1_pilot_share = ament_index_cpp::get_package_share_directory("g1_pilot");
         RobotConfig config;
-        config.asset_file = this->declare_parameter<std::string>(
-            "asset_file", description_share + "/assets/g1/g1_29dof_with_hand_rev_1_0.urdf");
-        config.asset_root = this->declare_parameter<std::string>("asset_root", description_share + "/assets/g1/");
-        config.config_file = this->declare_parameter<std::string>("config_file", g1_pilot_share + "/config/g1.yaml");
+        string_param(config.asset_file, "asset_file", description_share + "/assets/g1/g1_29dof_with_hand_rev_1_0.urdf");
+        string_param(config.asset_root, "asset_root", description_share + "/assets/g1/");
+        string_param(config.config_file, "config_file", g1_pilot_share + "/config/g1.yaml");
+        
         humanoid_ = std::make_shared<Humanoid>(&config);
         robot_ = declare_robot_();
         params_ = declare_ekf_params_();
@@ -47,34 +51,32 @@ public:
         still_threshold_ = this->declare_parameter<double>("still_threshold", 0.15);
 
         // (2) Frames, output options and TF.
-        fixed_frame_ = this->declare_parameter<std::string>("fixed_frame", "foot_world");
-        tf_root_frame_ = this->declare_parameter<std::string>("tf_root_frame", "sensor");
-        publish_tf_ = this->declare_parameter<bool>("publish_tf", true);
         tf_decimation_ = std::max<int64_t>(1, this->declare_parameter<int64_t>("tf_decimation", 1));
         pose_decimation_ = std::max<int64_t>(1, this->declare_parameter<int64_t>("pose_publish_decimation", 4));
-        camera_link_frame_ = this->declare_parameter<std::string>("camera_link_frame", "camera_link");
-        camera_imu_frame_ = this->declare_parameter<std::string>("camera_imu_frame", "camera_imu_optical_frame");
-        use_header_stamps_ = this->declare_parameter<bool>("use_header_stamps", true);
+        
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
+        string_param(fixed_frame_, "fixed_frame", "foot_world");
+        string_param(camera_link_frame_, "camera_link_frame", "camera_link");
+        string_param(camera_imu_frame_, "camera_imu_frame", "camera_imu_optical_frame");
+        string_param(pelvis_imu_topic_, "pelvis_imu_topic", "/pelvis_imu");
+        string_param(torso_imu_topic_, "torso_imu_topic", "/torso_imu");
+        string_param(torso_imu_topic_, "torso_imu_topic", "/torso_imu");
+        string_param(joint_states_topic_, "joint_states_topic", "/feedback");
+
         // (3) Publishers and subscribers.
         const auto qos = rclcpp::SensorDataQoS();
-        torso_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
-            this->declare_parameter<std::string>("torso_pose_topic", "/body_ekf/torso_pose"), 5);
-        joint_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
-            this->declare_parameter<std::string>("joint_states_topic", "/feedback"), qos,
-            std::bind(&BodyEKFNode::handle_joint_states_, this, std::placeholders::_1));
-        pelvis_imu_sub_ = imu_subscription_("pelvis_imu_topic", "/pelvis_imu", Body::Pelvis);
-        torso_imu_sub_ = imu_subscription_("torso_imu_topic", "/torso_imu", Body::Torso);
+        torso_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(torso_pose_topic_, 5);
+        joint_sub_ = encoder_subscription_(joint_states_topic_);
+        pelvis_imu_sub_ = imu_subscription_(pelvis_imu_topic_, Body::Pelvis);
+        torso_imu_sub_ = imu_subscription_(torso_imu_topic_, Body::Torso);
 
         // (4) Camera IMU after its TF resolves, or the torso gyro alone right away.
         const std::string robot_name = this->declare_parameter<std::string>("robot_name", "unknown");
         if (params_.use_camera_imu) {
-            camera_imu_sub_ = this->create_subscription<sensor_msgs::msg::Imu>(
-                this->declare_parameter<std::string>("camera_imu_topic", "/camera/camera/imu"), qos,
-                std::bind(&BodyEKFNode::handle_camera_imu_, this, std::placeholders::_1));
+            camera_imu_sub_ = imu_subscription_(camera_imu_frame_, Body::Camera);
             camera_timer_ = this->create_wall_timer(500ms, std::bind(&BodyEKFNode::resolve_camera_frames_, this));
             RCLCPP_INFO(this->get_logger(), "body_ekf (%s): waiting for camera TF, then a still period",
                         robot_name.c_str());
@@ -96,11 +98,8 @@ private:
 
     // Frames and output options
     std::string fixed_frame_;
-    std::string tf_root_frame_;
     std::string camera_link_frame_;
     std::string camera_imu_frame_;
-    bool publish_tf_ = true;
-    bool use_header_stamps_ = true;
     int64_t tf_decimation_ = 1;
     int64_t pose_decimation_ = 4;
     int64_t grid_count_ = 0;
@@ -117,17 +116,18 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr pelvis_imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr torso_imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr camera_imu_sub_;
+    std::string pelvis_imu_topic_;
+    std::string torso_imu_topic_;
+    std::string joint_states_topic_;
+    std::string torso_pose_topic_;
 
     BodyConfig declare_robot_()
     {
-        using Strings = std::vector<std::string>;
         using Doubles = std::vector<double>;
         return make_body_config(
             this->declare_parameter<Doubles>("camera_mount_xyz", Doubles{0.0, 0.0, 0.0}),
             this->declare_parameter<Doubles>("camera_mount_rpy_deg", Doubles{0.0, 0.0, 0.0}),
-            this->declare_parameter<Doubles>("camera_mount_quat_xyzw", Doubles{}),
-            this->declare_parameter<Strings>("joint_gain_names", Strings{}),
-            this->declare_parameter<Doubles>("joint_gain_values", Doubles{}));
+            this->declare_parameter<Doubles>("camera_mount_quat_xyzw", Doubles{}));
     }
 
     EKFParams declare_ekf_params_()
@@ -143,24 +143,6 @@ private:
         p.gyro_density_sensor = this->declare_parameter<double>("gyro_density_sensor", 0.0);
         p.use_camera_imu = this->declare_parameter<bool>("use_camera_imu", false);
         return p;
-    }
-
-    // Pelvis and torso IMU axes are taken as the pelvis and torso link axes.
-    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscription_(
-        const std::string& parameter, const std::string& default_topic, Body body)
-    {
-        return this->create_subscription<sensor_msgs::msg::Imu>(
-            this->declare_parameter<std::string>(parameter, default_topic), rclcpp::SensorDataQoS(),
-            [this, body](const sensor_msgs::msg::Imu::SharedPtr msg) {
-                if (!estimator_) {
-                    return;
-                }
-                const auto& w = msg->angular_velocity;
-                const auto& a = msg->linear_acceleration;
-                estimator_->add_imu(body, stamp_ns_(msg->header.stamp), Eigen::Vector3d(w.x, w.y, w.z),
-                                    Eigen::Vector3d(a.x, a.y, a.z));
-                process_();
-            });
     }
 
     void resolve_camera_frames_()
@@ -187,34 +169,40 @@ private:
             calibration_duration_, still_threshold_);
     }
 
-    int64_t stamp_ns_(const builtin_interfaces::msg::Time& stamp)
+    // Pelvis and torso IMU axes are taken as the pelvis and torso link axes.
+    rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_subscription_(
+        const std::string& topic, Body body)
     {
-        return use_header_stamps_ ? rclcpp::Time(stamp).nanoseconds() : this->get_clock()->now().nanoseconds();
+        return this->create_subscription<sensor_msgs::msg::Imu>(topic, rclcpp::SensorDataQoS(),
+            [this, body](const sensor_msgs::msg::Imu::SharedPtr msg) {
+                if (!estimator_) {
+                    return;
+                }
+                const auto& w = msg->angular_velocity;
+                const auto& a = msg->linear_acceleration;
+                estimator_->add_imu(
+                    body, rclcpp::Time(msg->header.stamp).nanoseconds(), 
+                    Eigen::Vector3d(w.x, w.y, w.z),
+                    Eigen::Vector3d(a.x, a.y, a.z)
+                );
+                process_();
+            });
     }
 
-    void handle_joint_states_(const sensor_msgs::msg::JointState::SharedPtr msg)
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr encoder_subscription_(const std::string topic)
     {
-        if (!estimator_) {
-            return;
-        }
-        JointState state;
-        state.name = msg->name;
-        state.position = msg->position;
-        state.velocity = msg->velocity;
-        estimator_->add_joint_state(stamp_ns_(msg->header.stamp), state);
-        process_();
-    }
-
-    void handle_camera_imu_(const sensor_msgs::msg::Imu::SharedPtr msg)
-    {
-        if (!estimator_) {
-            return;
-        }
-        const auto& w = msg->angular_velocity;
-        const auto& a = msg->linear_acceleration;
-        estimator_->add_camera_imu(stamp_ns_(msg->header.stamp), Eigen::Vector3d(w.x, w.y, w.z),
-                                   Eigen::Vector3d(a.x, a.y, a.z));
-        process_();
+        return this->create_subscription<sensor_msgs::msg::JointState>(topic, rclcpp::SensorDataQoS(),
+            [this](const sensor_msgs::msg::JointState::SharedPtr msg){
+                if (!estimator_) {
+                    return;
+                }
+                estimator_->add_joint_state(
+                    rclcpp::Time(msg->header.stamp).nanoseconds(), 
+                    JointState{msg->name, msg->position, msg->velocity, {}}
+                );
+                process_();
+            }
+        );
     }
 
     void process_()
@@ -245,39 +233,18 @@ private:
         if (grid_count_ % pose_decimation_ == 0) {
             torso_pub_->publish(convertToPoseStamped(output.T_foot_torso, fixed_frame_, stamp));
         }
-        if (publish_tf_ && grid_count_ % tf_decimation_ == 0) {
-            publish_root_tf_(output.T_foot_torso, stamp);
+        if (grid_count_ % tf_decimation_ == 0) {
+            const auto pose = convertToPoseStamped(output.T_foot_torso.inverse(), robot_.torso_link, stamp);
+            geometry_msgs::msg::TransformStamped message;
+            message.header = pose.header;
+            message.child_frame_id = fixed_frame_;
+            message.transform.translation.x = pose.pose.position.x;
+            message.transform.translation.y = pose.pose.position.y;
+            message.transform.translation.z = pose.pose.position.z;
+            message.transform.rotation = pose.pose.orientation;
+            tf_broadcaster_->sendTransform(message);
         }
         ++grid_count_;
-    }
-
-    // foot_world <- root such that torso_link resolves to the EKF torso pose in the live TF tree.
-    void publish_root_tf_(const Eigen::Matrix4d& T_foot_torso, const rclcpp::Time& stamp)
-    {
-        // (1) Live tree: root <- torso_link.
-        Eigen::Matrix4d T_root_torso = Eigen::Matrix4d::Identity();
-        if (tf_root_frame_ != robot_.torso_link) {
-            try {
-                T_root_torso = to_matrix(tf_buffer_->lookupTransform(
-                    tf_root_frame_, robot_.torso_link, tf2::TimePointZero).transform);
-            } catch (const tf2::TransformException& e) {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                    "No %s -> %s transform yet: %s", tf_root_frame_.c_str(), robot_.torso_link.c_str(), e.what());
-                return;
-            }
-        }
-
-        // (2) foot_world <- root.
-        const Eigen::Matrix4d T = T_foot_torso * T_root_torso.inverse();
-        const auto pose = convertToPoseStamped(T, fixed_frame_, stamp);
-        geometry_msgs::msg::TransformStamped message;
-        message.header = pose.header;
-        message.child_frame_id = tf_root_frame_;
-        message.transform.translation.x = pose.pose.position.x;
-        message.transform.translation.y = pose.pose.position.y;
-        message.transform.translation.z = pose.pose.position.z;
-        message.transform.rotation = pose.pose.orientation;
-        tf_broadcaster_->sendTransform(message);
     }
 };
 

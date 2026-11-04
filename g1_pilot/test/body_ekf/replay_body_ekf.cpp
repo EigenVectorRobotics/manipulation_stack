@@ -83,8 +83,7 @@ std::unique_ptr<BodyAttitudeEstimator> make_estimator(
     cfg.asset_root = asset_root;
     cfg.asset_file = asset_root + "/g1_29dof_with_hand_rev_1_0.urdf";
     cfg.config_file = config_file;
-    const BodyConfig robot = make_body_config({}, {}, {}, strings(meta, "joint_gain_names"),
-                                              numbers(meta, "joint_gain_values"));
+    const BodyConfig robot = make_body_config({}, {}, {});
     EKFParams params;
     const auto densities = numbers(meta, "gyro_densities");
     params.gyro_density_pelvis = densities.at(0);
@@ -168,7 +167,7 @@ void run_online(std::unique_ptr<BodyAttitudeEstimator> estimator, const Meta& me
         if (s == 0) online.add_joint_state(t, joint_state(names, r, 1));
         if (s == 1) online.add_imu(Body::Pelvis, t, vec3(r, 1), vec3(r, 4));
         if (s == 2) online.add_imu(Body::Torso, t, vec3(r, 1), vec3(r, 4));
-        if (s == 3) online.add_camera_imu(t, vec3(r, 1), vec3(r, 4));
+        if (s == 3) online.add_imu(Body::Camera, t, vec3(r, 1), vec3(r, 4));
         for (const auto& output : online.process().outputs) {
             write_row(out, output.t, output.T_foot_torso);
         }

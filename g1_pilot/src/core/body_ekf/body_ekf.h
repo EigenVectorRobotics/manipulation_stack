@@ -26,7 +26,7 @@ Eigen::Matrix3d rpy_matrix(double roll, double pitch, double yaw);
 double heading(const Eigen::Matrix3d& R);
 Eigen::Matrix3d tilt_yaw_rotation(const Eigen::Vector3d& up, double yaw);
 
-enum class Body { Pelvis, Torso };
+enum class Body { Pelvis, Torso, Camera };
 
 // Error state: [pelvis rotation, torso rotation, b_pelvis, b_torso, b_sensor], rotations in body axes.
 class Body2EKF {
@@ -76,7 +76,6 @@ private:
 
 struct BodyConfig {
     Eigen::Matrix4d T_torso_camera_link = Eigen::Matrix4d::Identity();
-    std::map<std::string, double> joint_gains;
     std::string base_link = "pelvis";
     std::string torso_link = "torso_link";
     std::string foot_link = "left_ankle_roll_link";
@@ -86,15 +85,7 @@ struct BodyConfig {
 BodyConfig make_body_config(
     const std::vector<double>& camera_mount_xyz,
     const std::vector<double>& camera_mount_rpy_deg,
-    const std::vector<double>& camera_mount_quat_xyzw,
-    const std::vector<std::string>& joint_gain_names,
-    const std::vector<double>& joint_gain_values
-);
-
-// q_true = gain * q, by joint name; encoder offsets are applied upstream by unitree_interface.
-JointState correct_joints(
-    const JointState& state,
-    const std::map<std::string, double>& gains
+    const std::vector<double>& camera_mount_quat_xyzw
 );
 
 // Angles in rad, gyro densities in rad/s/sqrt(Hz); a density <= 0 is measured on the still period.
@@ -116,7 +107,7 @@ struct EKFParams {
     double resample_window = 5e-3;
     int encoder_decimation = 2;
     int init_samples = 50;
-    bool use_camera_imu = false;    // off: torso gyro only, grid on the torso-IMU stamps
+    bool use_camera_imu = false;    // off: torso gyro only
 };
 
 // Sensor data at one grid stamp (ns); IMU vectors in their own frames.
@@ -243,8 +234,8 @@ struct ProcessReport {
     bool camera_ahead = false;      // camera-IMU stamps lead the joint stamps by > 1 s
 };
 
-// Camera-IMU stamps (or a regular grid on the torso-IMU stamps) define the grid; samples there feed the still-period
-// calibration, then the EKF.
+// A regular grid on the torso-IMU stamps; every stream is resampled there to feed the still-period calibration, then
+// the EKF.
 class OnlineBodyEstimator {
 public:
     OnlineBodyEstimator(
@@ -255,22 +246,15 @@ public:
 
     void add_joint_state(int64_t t, const JointState& state);
     void add_imu(Body body, int64_t t, const Eigen::Vector3d& gyro, const Eigen::Vector3d& acc);
-    void add_camera_imu(int64_t t, const Eigen::Vector3d& gyro, const Eigen::Vector3d& acc);
 
     ProcessReport process();
     const BodyAttitudeEstimator& estimator() const { return *estimator_; }
 
 private:
-    struct PendingImu {
-        int64_t t;
-        Eigen::Vector3d gyro;
-        Eigen::Vector3d acc;
-    };
-
     enum class Stamp { Ready, Wait, Stale };
 
     Stamp classify(int64_t t, ProcessReport& report) const;
-    GridSample resample(const PendingImu& imu, double& joint_speed) const;
+    GridSample resample(int64_t t, double& joint_speed) const;
     void queue_grid(int64_t t);
 
     std::unique_ptr<BodyAttitudeEstimator> estimator_;
@@ -278,7 +262,8 @@ private:
     SampleBuffer joints_;
     SampleBuffer pelvis_;
     SampleBuffer torso_;
-    std::deque<PendingImu> pending_;
+    SampleBuffer camera_;
+    std::deque<int64_t> pending_;
     std::optional<int64_t> next_grid_;
     std::vector<std::string> joint_names_;
     std::vector<bool> still_joints_;

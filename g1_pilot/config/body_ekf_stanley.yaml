@@ -23,9 +23,9 @@ body_ekf:
     camera_link_frame: camera_link
     camera_imu_frame: camera_imu_optical_frame
 
-    # Camera mount: torso_link -> camera_link (orients the camera IMU on the torso)
+    # Camera mount: torso_link -> camera_link, from d435_joint in g1_29dof_with_hand_rev_1_0_ros.urdf
     camera_mount_xyz: [0.081099, 0.023467, 0.414921]
-    camera_mount_rpy_deg: [1.3, 3.4, -1.592365]
+    camera_mount_rpy_deg: [-0.326357, 18.371376, -1.592364]
 
     # Encoder offsets are applied in unitree_interface (config/stanley.yaml), so /feedback is already corrected
 
