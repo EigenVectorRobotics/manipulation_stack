@@ -64,6 +64,7 @@ public:
         string_param(pelvis_imu_topic_, "pelvis_imu_topic", "/pelvis_imu");
         string_param(torso_imu_topic_, "torso_imu_topic", "/torso_imu");
         string_param(joint_states_topic_, "joint_states_topic", "/feedback");
+        string_param(torso_pose_topic_, "torso_pose_topic", "/body_ekf/torso_pose");
 
         // (3) Publishers and subscribers.
         const auto qos = rclcpp::SensorDataQoS();
