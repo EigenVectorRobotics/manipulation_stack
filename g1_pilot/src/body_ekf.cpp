@@ -63,7 +63,6 @@ public:
         string_param(camera_imu_frame_, "camera_imu_frame", "camera_imu_optical_frame");
         string_param(pelvis_imu_topic_, "pelvis_imu_topic", "/pelvis_imu");
         string_param(torso_imu_topic_, "torso_imu_topic", "/torso_imu");
-        string_param(torso_imu_topic_, "torso_imu_topic", "/torso_imu");
         string_param(joint_states_topic_, "joint_states_topic", "/feedback");
 
         // (3) Publishers and subscribers.
