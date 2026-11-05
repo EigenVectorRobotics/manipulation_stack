@@ -12,9 +12,9 @@
   </mujoco>
 
   <!-- [CAUTION] uncomment when convert to mujoco -->
-  <link name="base_link"></link>
+  <link name="pelvis_reference"></link>
   <joint name="g1_reference_to_pelvis_joint" type="fixed">
-    <parent link="base_link"/>
+    <parent link="pelvis_reference"/>
     <child link="pelvis"/>
   </joint>
 

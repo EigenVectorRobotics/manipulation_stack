@@ -72,7 +72,7 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='control_feedback_bridge_transform',
-        arguments=['0', '0', '0', '0', '0', '0', 'base_link', 'control/base_link']
+        arguments=['0', '0', '0', '0', '0', '0', 'pelvis_reference', 'control/pelvis_reference']
     ))
 
     ld.add_action(Node(
