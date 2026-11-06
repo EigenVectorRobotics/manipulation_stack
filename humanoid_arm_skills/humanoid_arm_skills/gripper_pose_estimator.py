@@ -24,8 +24,8 @@ class GripperPoseEstimator(Node):
     def __init__(self):
         super().__init__('gripper_pose_estimator')
         self.declare_parameter('arm', 'right')
-        self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw')
-        self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
+        self.declare_parameter('depth_topic', '/camera/camera/depth/image_rect_raw')
+        self.declare_parameter('camera_info_topic', '/camera/camera/depth/camera_info')
         self.declare_parameter('pose_topic', 'gripper_pose')
         self.declare_parameter('min_points', 500)
         self.declare_parameter('min_inliers', 0.4)
