@@ -861,7 +861,7 @@ JointSpacePlanner::planPath(
     const Eigen::MatrixXd& goal_pose
 ) {
     std::cout << "IK for goal pose:" << std::endl;
-    JointState goal_state = solveGoalConfig(goal_pose, start_state, 5);
+    JointState goal_state = solveGoalConfig(goal_pose, start_state, 10);
     if (goal_state.position.size() == 0)
         return {};
 

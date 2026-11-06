@@ -12,7 +12,7 @@ class VisualServoPlanner : public JointSpacePlanner {
             std::shared_ptr<HumanoidIK> ik_handle,
             bool left_arm = false,
             double approach_offset = 0.10,
-            int final_leg_steps = 4,
+            int max_final_leg_steps = 30,
             double step_size = 0.05,
             double goal_bias = 0.1,
             double rewire_factor = 1.1,
@@ -31,22 +31,28 @@ class VisualServoPlanner : public JointSpacePlanner {
         std::vector<Eigen::MatrixXd>>
         planPath(
             const JointState& start_state,
-            const Eigen::MatrixXd& goal_pose
-        ) override;
+            const Eigen::MatrixXd& goal_pose,
+            int final_leg_step = 10,
+            bool retreat = false
+        );
 
         JointTrajectory
         planTrajectory(
             const JointState& start_state,
             const Eigen::MatrixXd& goal_pose,
+            int final_leg_steps = 10,
+            bool retreat = false,
             double time_step = 0.01,
             double max_joint_vel = 1.0,
             double max_joint_acc = 2.0
-        ) override;
+        );
 
         JointTrajectory
         replanTrajectory(
             const JointState& start_state,
             const Eigen::MatrixXd& goal_pose,
+            int final_leg_steps = 10,
+            bool retreat = false,
             double time_step = 0.01,
             double max_joint_vel = 1.0,
             double max_joint_acc = 2.0
@@ -57,49 +63,43 @@ class VisualServoPlanner : public JointSpacePlanner {
             const JointState& start_state,
             const Eigen::MatrixXd& goal_pose,
             std::size_t step,
-            bool retreat,
+            int final_leg_steps,
+            bool retreat = false,
             double time_step = 0.01,
             double max_joint_vel = 1.0,
             double max_joint_acc = 2.0
         );
 
-        std::size_t finalLegSize() const { return final_leg_.size(); }
-
     protected:
-        std::vector<Eigen::Matrix4d> linearInterpolate(
-            const Eigen::Matrix4d& T_from,
-            const Eigen::Matrix4d& T_to,
-            int steps
-        );
 
-        Eigen::Matrix4d startPose(const JointState& start_state);
+        // Joint space computation
+        void computeApproachLeg(const Eigen::MatrixXd& goal_pose, std::size_t leg_size);
 
-        void appendFinalLeg(
-            const Eigen::MatrixXd& goal_pose,
-            std::vector<Eigen::VectorXd>& joints,
-            bool retreat = false
-        );
+        // Find closest point on path given a current configuration
+        std::pair<double, std::size_t> closestOnPath(const Eigen::VectorXd& q);
 
-        JointTrajectory appendRetreat(
-            JointTrajectory traj,
-            const Eigen::VectorXd& goal_q,
-            const Eigen::MatrixXd& goal_pose,
-            double time_step,
-            double max_joint_vel,
-            double max_joint_acc
-        );
+        // Uses results stored in class variables to construct outputs
+        std::vector<Eigen::VectorXd> constructPath(bool retreat);
 
+        // Uses results stored in class variables to construct outputs
+        JointTrajectory constructTrajectory(bool retreat, double time_step,
+                                    double max_joint_vel, double max_joint_acc);
+
+        double approach_offset_;
+
+        // Containers needed to store the approach retreat trajectories
+        int max_final_leg_steps_;
         Eigen::Matrix4d intermediate_pose_offset_;
-        std::vector<Eigen::Matrix4d> final_leg_;
-        Eigen::VectorXd leg_q_;
+        std::vector<Eigen::Matrix4d> final_leg_; // Stores cartesian space relative pose matrices
 
-        std::vector<Eigen::VectorXd> last_search_;
+        std::vector<Eigen::VectorXd> approach_leg_; // Store joint space calculations for the last legs
+        std::vector<Eigen::VectorXd> retreat_leg_;
         Eigen::Matrix4d last_goal_pose_ = Eigen::Matrix4d::Identity();
-        Eigen::VectorXd last_start_q_;
+
+        // Replanning
         bool last_plan_valid_ = false;
-        // Replans always go back through the pre-grasp point; only a goal's first plan may approach directly
-        bool allow_direct_ = true;
         bool last_plan_left_ = false;
+        
 };
 
 } // namespace HumanoidPilot

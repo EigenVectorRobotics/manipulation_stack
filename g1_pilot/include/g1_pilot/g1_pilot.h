@@ -128,31 +128,33 @@ public:
         Eigen::VectorXd desired_ee_vel = Eigen::VectorXd::Zero(6)
     );
 
-    std::pair<
-    std::vector<Eigen::VectorXd>,
-    std::vector<Eigen::MatrixXd>>
-    planPath(
-        const Eigen::MatrixXd* goal_pose,
-        const Eigen::MatrixXd* start_pose = nullptr,
-        const Eigen::VectorXd* start_vel = nullptr,
-        const Eigen::VectorXd* goal_vel = nullptr,
-        const Eigen::VectorXd* start_acc = nullptr,
-        const Eigen::VectorXd* goal_acc = nullptr
-    );
+    // std::pair<
+    // std::vector<Eigen::VectorXd>,
+    // std::vector<Eigen::MatrixXd>>
+    // planPath(
+    //     const Eigen::MatrixXd* goal_pose,
+    //     const Eigen::MatrixXd* start_pose = nullptr,
+    //     const Eigen::VectorXd* start_vel = nullptr,
+    //     const Eigen::VectorXd* goal_vel = nullptr,
+    //     const Eigen::VectorXd* start_acc = nullptr,
+    //     const Eigen::VectorXd* goal_acc = nullptr
+    // );
 
-    JointTrajectory
-    planTrajectory(
-        const Eigen::MatrixXd* goal_pose,
-        const Eigen::MatrixXd* start_pose = nullptr,
-        double time_step = 0.01,
-        double max_joint_vel = 1.0,
-        double max_joint_acc = 2.0
-    );
+    // JointTrajectory
+    // planTrajectory(
+    //     const Eigen::MatrixXd* goal_pose,
+    //     const Eigen::MatrixXd* start_pose = nullptr,
+    //     double time_step = 0.01,
+    //     double max_joint_vel = 1.0,
+    //     double max_joint_acc = 2.0
+    // );
 
     JointTrajectory
     planTrajectory(
         const JointState& start_state,
         const Eigen::MatrixXd& goal_pose,
+        int final_leg_steps = 10,
+        bool retreat = false,
         double time_step = 0.01,
         double max_joint_vel = 1.0,
         double max_joint_acc = 2.0
@@ -162,6 +164,8 @@ public:
     replanTrajectory(
         const JointState& start_state,
         const Eigen::MatrixXd& goal_pose,
+        int final_leg_steps = 10,
+        bool retreat = false,
         double time_step = 0.01,
         double max_joint_vel = 1.0,
         double max_joint_acc = 2.0
@@ -172,13 +176,12 @@ public:
         const JointState& start_state,
         const Eigen::MatrixXd& goal_pose,
         std::size_t step,
-        bool retreat,
+        int final_leg_steps,
+        bool retreat = false,
         double time_step = 0.01,
         double max_joint_vel = 1.0,
         double max_joint_acc = 2.0
     );
-
-    std::size_t finalLegSize() const;
 
     JointTrajectory brake(
         const JointState& state,

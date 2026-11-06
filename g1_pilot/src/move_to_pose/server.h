@@ -80,6 +80,7 @@ private:
     void try_replan_(const std::shared_ptr<GoalHandle> & goal);
     Eigen::MatrixXd replan_target_();
     void start_stepping_(const JointState & state, const Eigen::MatrixXd & target);
+    Eigen::Vector3d safety_offset_();
     void step_final_leg_(const std::shared_ptr<GoalHandle> & goal);
     Eigen::Matrix4d pelvis_from_anchor_(const JointState & state);
     Eigen::MatrixXd to_pelvis_frame_(const PoseStamped & pose);
@@ -142,11 +143,14 @@ private:
     double lock_time_ = -1.0;
     bool final_leg_refreshed_ = false;
     bool hold_between_steps_ = false;
+    rclcpp::Time hold_since_;
 
     // Final-leg stepping (worker only): the goal frozen in the foot frame, re-mapped into the pelvis before every step
     bool stepping_ = false;
     std::size_t leg_step_ = 0;
+    int leg_steps_ = 0;
     Eigen::Matrix4d goal_in_anchor_ = Eigen::Matrix4d::Identity();
+    Eigen::Vector3d stepping_offset_ = Eigen::Vector3d::Zero();
 
     // target_mutex_ protects the target stream independently of control and goals.
     std::mutex target_mutex_;

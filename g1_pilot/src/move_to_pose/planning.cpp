@@ -85,9 +85,10 @@ MoveToPoseServer::Plan MoveToPoseServer::plan_(
     const double dt = get_parameter("plan_time_step").as_double();
     const double velocity = get_parameter("max_joint_vel").as_double();
     const double acceleration = get_parameter("max_joint_acc").as_double();
+    const int steps = static_cast<int>(get_parameter("final_leg_steps").as_int());
     return to_plan_(replan
-        ? planner_->replanTrajectory(start, target, dt, velocity, acceleration)
-        : planner_->planTrajectory(start, target, dt, velocity, acceleration), left);
+        ? planner_->replanTrajectory(start, target, steps, false, dt, velocity, acceleration)
+        : planner_->planTrajectory(start, target, steps, false, dt, velocity, acceleration), left);
 }
 
 MoveToPoseServer::Plan MoveToPoseServer::to_plan_(const HumanoidPilot::JointTrajectory & planned, bool left)
@@ -185,6 +186,9 @@ void MoveToPoseServer::start_stepping_(const JointState & state, const Eigen::Ma
 {
     // The goal is frozen in the foot frame, which stays put while the pelvis leans with the reaching arm.
     goal_in_anchor_ = pelvis_from_anchor_(state).inverse() * Eigen::Matrix4d(target);
+    stepping_offset_ = safety_offset_();
+    leg_steps_ = static_cast<int>(get_parameter("final_leg_steps").as_int());
+    hold_since_ = get_clock()->now();
     stepping_ = true;
     leg_step_ = 1;
     RCLCPP_INFO(get_logger(), "Stepping the final leg against the target fixed in %s",
@@ -193,25 +197,29 @@ void MoveToPoseServer::start_stepping_(const JointState & state, const Eigen::Ma
 
 void MoveToPoseServer::step_final_leg_(const std::shared_ptr<GoalHandle> & goal)
 {
-    // (1) Plan the next step only once the previous one is held at rest.
+    // (1) Plan the next step only once the previous one is held at rest and the body has had time to settle.
     if (leg_step_ == 0) return;
     {
         std::lock_guard<std::mutex> lock(ctrl_mutex_);
         if (leg_step_ > 1 && mode_ != ControlMode::Holding) return;
+        if (leg_step_ > 1 && (get_clock()->now() - hold_since_).seconds()
+                < get_parameter("final_leg_settle_time").as_double()) return;
     }
     JointState start;
     if (!stop_for_replan_(goal, start)) return;
 
     // (2) Re-map the frozen goal into the current pelvis; a last pass repeats the goal step, then holds and retreats.
-    const Eigen::Matrix4d target = pelvis_from_anchor_(start) * goal_in_anchor_;
-    const std::size_t n = planner_->finalLegSize();
+    // The frozen goal carries the safety offset of the stepping start; an offset set since then moves it in the target frame
+    Eigen::Matrix4d target = pelvis_from_anchor_(start) * goal_in_anchor_;
+    target.block<3, 1>(0, 3) += target.block<3, 3>(0, 0) * (safety_offset_() - stepping_offset_);
+    const std::size_t n = static_cast<std::size_t>(leg_steps_);
     const bool last = leg_step_ >= n;
     const std::size_t step = std::min(leg_step_, n - 1);
     Plan plan;
     try {
         planner_->setLeftArm(goal->get_goal()->left_arm);
         plan = to_plan_(planner_->planFinalLegStep(
-            start, target, step, last, get_parameter("plan_time_step").as_double(),
+            start, target, step, leg_steps_, last, get_parameter("plan_time_step").as_double(),
             get_parameter("max_joint_vel").as_double(), get_parameter("max_joint_acc").as_double()),
             goal->get_goal()->left_arm);
     } catch (const std::exception & e) {
@@ -230,6 +238,13 @@ void MoveToPoseServer::step_final_leg_(const std::shared_ptr<GoalHandle> & goal)
     RCLCPP_INFO(get_logger(), "Final-leg step %zu/%zu to [%.3f %.3f %.3f]",
                 leg_step_, n, target(0, 3), target(1, 3), target(2, 3));
     leg_step_ = last ? 0 : leg_step_ + 1;
+}
+
+Eigen::Vector3d MoveToPoseServer::safety_offset_()
+{
+    return {get_parameter("arm_safety_distance_x").as_double(),
+            get_parameter("arm_safety_distance_y").as_double(),
+            get_parameter("arm_safety_distance_z").as_double()};
 }
 
 Eigen::Matrix4d MoveToPoseServer::pelvis_from_anchor_(const JointState & state)

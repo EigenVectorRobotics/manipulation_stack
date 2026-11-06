@@ -343,72 +343,76 @@ JointState Humanoid::control_right_arm(
     );
 }
 
-std::pair<
-std::vector<Eigen::VectorXd>,
-std::vector<Eigen::MatrixXd>>
-Humanoid::planPath(
-    const Eigen::MatrixXd* goal_pose,
-    const Eigen::MatrixXd* start_pose,
-    const Eigen::VectorXd* /*start_vel*/,
-    const Eigen::VectorXd* /*goal_vel*/,
-    const Eigen::VectorXd* /*start_acc*/,
-    const Eigen::VectorXd* /*goal_acc*/
-){
-    if (goal_pose == nullptr) {
-        throw std::invalid_argument("Humanoid::planPath: goal_pose is null");
-    }
-    if (start_pose == nullptr) {
-        throw std::invalid_argument("Humanoid::planPath: start_pose is null");
-    }
+// std::pair<
+// std::vector<Eigen::VectorXd>,
+// std::vector<Eigen::MatrixXd>>
+// Humanoid::planPath(
+//     const Eigen::MatrixXd* goal_pose,
+//     const Eigen::MatrixXd* start_pose,
+//     const Eigen::VectorXd* /*start_vel*/,
+//     const Eigen::VectorXd* /*goal_vel*/,
+//     const Eigen::VectorXd* /*start_acc*/,
+//     const Eigen::VectorXd* /*goal_acc*/
+// ){
+//     if (goal_pose == nullptr) {
+//         throw std::invalid_argument("Humanoid::planPath: goal_pose is null");
+//     }
+//     if (start_pose == nullptr) {
+//         throw std::invalid_argument("Humanoid::planPath: start_pose is null");
+//     }
 
-    return impl_->motion_planner->planPath(*goal_pose, *start_pose);
-}
+//     return impl_->motion_planner->planPath(*goal_pose, *start_pose);
+// }
 
-JointTrajectory
-Humanoid::planTrajectory(
-    const Eigen::MatrixXd* goal_pose,
-    const Eigen::MatrixXd* start_pose,
-    double time_step,
-    double max_joint_vel,
-    double max_joint_acc
-){
-    if (goal_pose == nullptr) {
-        throw std::invalid_argument("Humanoid::planTrajectory: goal_pose is null");
-    }
-    if (start_pose == nullptr) {
-        throw std::invalid_argument("Humanoid::planTrajectory: start_pose is null");
-    }
+// JointTrajectory
+// Humanoid::planTrajectory(
+//     const Eigen::MatrixXd* goal_pose,
+//     const Eigen::MatrixXd* start_pose,
+//     double time_step,
+//     double max_joint_vel,
+//     double max_joint_acc
+// ){
+//     if (goal_pose == nullptr) {
+//         throw std::invalid_argument("Humanoid::planTrajectory: goal_pose is null");
+//     }
+//     if (start_pose == nullptr) {
+//         throw std::invalid_argument("Humanoid::planTrajectory: start_pose is null");
+//     }
 
-    return impl_->motion_planner->planTrajectory(
-        *goal_pose, *start_pose,
-        time_step, max_joint_vel, max_joint_acc
-    );
-}
+//     return impl_->motion_planner->planTrajectory(
+//         *goal_pose, *start_pose,
+//         time_step, max_joint_vel, max_joint_acc
+//     );
+// }
 
 JointTrajectory
 Humanoid::planTrajectory(
     const JointState& start_state,
     const Eigen::MatrixXd& goal_pose,
+    int final_leg_steps,
+    bool retreat,
     double time_step,
     double max_joint_vel,
     double max_joint_acc
 ){
     return impl_->motion_planner->planTrajectory(
-        start_state, goal_pose,
+        start_state, goal_pose, final_leg_steps, retreat,
         time_step, max_joint_vel, max_joint_acc
-    ); 
+    );
 }
 
 JointTrajectory
 Humanoid::replanTrajectory(
     const JointState& start_state,
     const Eigen::MatrixXd& goal_pose,
+    int final_leg_steps,
+    bool retreat,
     double time_step,
     double max_joint_vel,
     double max_joint_acc
 ){
     return impl_->motion_planner->replanTrajectory(
-        start_state, goal_pose,
+        start_state, goal_pose, final_leg_steps, retreat,
         time_step, max_joint_vel, max_joint_acc
     );
 }
@@ -418,19 +422,16 @@ Humanoid::planFinalLegStep(
     const JointState& start_state,
     const Eigen::MatrixXd& goal_pose,
     std::size_t step,
+    int final_leg_steps,
     bool retreat,
     double time_step,
     double max_joint_vel,
     double max_joint_acc
 ){
     return impl_->motion_planner->planFinalLegStep(
-        start_state, goal_pose, step, retreat,
+        start_state, goal_pose, step, final_leg_steps, retreat,
         time_step, max_joint_vel, max_joint_acc
     );
-}
-
-std::size_t Humanoid::finalLegSize() const {
-    return impl_->motion_planner->finalLegSize();
 }
 
 JointTrajectory Humanoid::brake(

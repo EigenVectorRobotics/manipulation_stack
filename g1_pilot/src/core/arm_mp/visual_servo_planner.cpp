@@ -6,8 +6,10 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 #include <utility>
+#include <iterator>
 
 namespace HumanoidPilot{
 
@@ -39,81 +41,50 @@ constexpr double PATH_SEGMENT_EPS = 1e-12;
 constexpr double PREGRASP_DELAY = 1.0;
 constexpr double GOAL_DELAY = 1.0;
 
-double finalLegStart(const JointTrajectory& search, double time_step) {
-    return (search.position.front().size() - 1) * time_step + std::ceil(PREGRASP_DELAY / time_step) * time_step;
-}
-
 JointTrajectory concatenateTrajectories(
-    JointTrajectory first,
+    const JointTrajectory& first,
     const JointTrajectory& second,
     double delay = 0.0
 ) {
+    JointTrajectory out;
+    out.name = first.name;
+
     if (!std::isfinite(delay) || delay < 0.0 ||
-        (delay > 0.0 &&
-         (!std::isfinite(first.time_step) || first.time_step <= 0.0))) {
+        (delay > 0.0 && (!std::isfinite(first.time_step) || first.time_step <= 0.0))) {
         throw std::invalid_argument("trajectory delay must be nonnegative with a positive time step");
     }
-    const std::size_t delay_samples = delay > 0.0
-        ? static_cast<std::size_t>(std::ceil(delay / first.time_step)) : 0;
+    const std::size_t delay_samples = delay <= 0.0 ? 0 :
+        static_cast<std::size_t>(std::ceil(delay / first.time_step));
+
+    auto append = [&out](std::size_t k, const JointTrajectory& traj){
+        out.position[k].insert(out.position[k].end(), traj.position[k].begin(), traj.position[k].end());
+        out.velocity[k].insert(out.velocity[k].end(), traj.velocity[k].begin(), traj.velocity[k].end());
+        out.acceleration[k].insert(out.acceleration[k].end(), traj.acceleration[k].begin(), traj.acceleration[k].end());
+    };
 
     for (std::size_t j = 0; j < first.name.size(); ++j) {
-        first.position[j].insert(
-            first.position[j].end(), delay_samples, second.position[j].front());
-        first.velocity[j].insert(first.velocity[j].end(), delay_samples, 0.0);
-        first.acceleration[j].insert(first.acceleration[j].end(), delay_samples, 0.0);
-        first.position[j].insert(
-            first.position[j].end(), second.position[j].begin() + 1,
-            second.position[j].end());
-        first.velocity[j].insert(
-            first.velocity[j].end(), second.velocity[j].begin() + 1,
-            second.velocity[j].end());
-        first.acceleration[j].insert(
-            first.acceleration[j].end(), second.acceleration[j].begin() + 1,
-            second.acceleration[j].end());
+        append(j, first);
+        out.position[j].insert(out.position[j].end(), delay_samples, second.position[j].front());
+        out.velocity[j].insert(out.velocity[j].end(), delay_samples, 0.0);
+        out.acceleration[j].insert(out.acceleration[j].end(), delay_samples, 0.0);
+        append(j, second);
     }
-    return first;
+    return out;
 }
 
-} // namespace
-
-VisualServoPlanner::VisualServoPlanner(
-    pinocchio::Model& model,
-    std::shared_ptr<HumanoidIK> ik_handle,
-    bool left_arm,
-    double approach_offset,
-    int final_leg_steps,
-    double step_size,
-    double goal_bias,
-    double rewire_factor,
-    double solve_time_seconds,
-    double goal_tolerance,
-    double validity_resolution,
-    double cost_threshold_factor
-) :
-    JointSpacePlanner(model, ik_handle, left_arm, step_size, goal_bias,
-                      rewire_factor, solve_time_seconds, goal_tolerance,
-                      validity_resolution, cost_threshold_factor)
-{
-    intermediate_pose_offset_ = Eigen::Matrix4d::Identity();
-    intermediate_pose_offset_(0, 3) = -approach_offset;
-
-    // Final-leg cartesian poses in goal-relative frame: intermediate -> goal.
-    // At t=0 we're at intermediate (offset back from goal); at t=1 we're at goal.
-    final_leg_ = linearInterpolate(intermediate_pose_offset_,
-                                   Eigen::Matrix4d::Identity(),
-                                   final_leg_steps);
-
-    leg_q_ = Eigen::VectorXd::Zero(nq_);
-}
-
-VisualServoPlanner::~VisualServoPlanner() {}
-
-std::vector<Eigen::Matrix4d> VisualServoPlanner::linearInterpolate(
+void linearInterpolate(
     const Eigen::Matrix4d& T_from,
     const Eigen::Matrix4d& T_to,
-    int steps
+    int steps,
+    std::vector<Eigen::Matrix4d>& out
 ) {
-    std::vector<Eigen::Matrix4d> out(steps);
+
+    if (static_cast<std::size_t>(steps) > out.capacity()) {
+        throw std::invalid_argument("VisualServoPlanner::linearInterpolate: not enough space in output vector container."
+            " Requested: " + std::to_string(steps) + ", but received " + std::to_string(out.capacity()));
+    }
+    out.resize(steps);
+
     Eigen::Vector3d p_from = T_from.block<3,1>(0,3);
     Eigen::Vector3d p_to   = T_to.block<3,1>(0,3);
     Eigen::Quaterniond q_from(T_from.block<3,3>(0,0));
@@ -126,71 +97,108 @@ std::vector<Eigen::Matrix4d> VisualServoPlanner::linearInterpolate(
         T.block<3,1>(0,3) = p_from + t * (p_to - p_from);
         out[k] = T;
     }
-    return out;
 }
 
-Eigen::Matrix4d VisualServoPlanner::startPose(const JointState& start_state) {
-    std::tie(leg_q_, std::ignore, std::ignore) =
-        jointstate_to_vectors(start_state, model_);
+} // namespace
 
-    return configToPose(leg_q_);
+VisualServoPlanner::VisualServoPlanner(
+    pinocchio::Model& model,
+    std::shared_ptr<HumanoidIK> ik_handle,
+    bool left_arm,
+    double approach_offset,
+    int max_final_leg_steps,
+    double step_size,
+    double goal_bias,
+    double rewire_factor,
+    double solve_time_seconds,
+    double goal_tolerance,
+    double validity_resolution,
+    double cost_threshold_factor
+) :
+    JointSpacePlanner(model, ik_handle, left_arm, step_size, goal_bias,
+                      rewire_factor, solve_time_seconds, goal_tolerance,
+                      validity_resolution, cost_threshold_factor),
+    approach_offset_(approach_offset), max_final_leg_steps_(max_final_leg_steps)
+{
+    intermediate_pose_offset_ = Eigen::Matrix4d::Identity();
+    intermediate_pose_offset_(0, 3) = -approach_offset;
+
+    // Final-leg cartesian poses in goal-relative frame: intermediate -> goal.
+    // At t=0 we're at intermediate (offset back from goal); at t=1 we're at goal.
+    final_leg_.reserve(max_final_leg_steps);
+    approach_leg_.reserve(max_final_leg_steps);
+    retreat_leg_.reserve(max_final_leg_steps);
+
 }
 
-void VisualServoPlanner::appendFinalLeg(
+VisualServoPlanner::~VisualServoPlanner() {}
+
+void VisualServoPlanner::computeApproachLeg(
     const Eigen::MatrixXd& goal_pose,
-    std::vector<Eigen::VectorXd>& joints,
-    bool retreat
+    std::size_t leg_size
 ) {
-    JointState seed;
-    bool have_seed = false;
-    if (!joints.empty()) {
-        seed = vectors_to_jointstate(
-            joints.back(),
+    // (1) Calculate relative appraoch path
+    approach_leg_.clear();
+    linearInterpolate(
+        intermediate_pose_offset_, Eigen::Matrix4d::Identity(),
+        leg_size, final_leg_
+    );
+
+    // (2) Geet seed from prior
+    JointState seed = waypoints_.empty() ? JointState() : 
+        vectors_to_jointstate(
+            waypoints_.back(),
             Eigen::VectorXd::Zero(model_.nv),
             Eigen::VectorXd::Zero(model_.nv),
             model_
         );
-        have_seed = true;
-    }
+    bool have_seed = seed.position.size()>0;
 
-    // The retreat runs the leg backwards from the goal, which the seed already holds.
-    const std::size_t steps = retreat ? final_leg_.size() - 1 : final_leg_.size();
-    for (std::size_t i = 0; i < steps; ++i) {
-        Eigen::Matrix4d T_abs = goal_pose * final_leg_[retreat ? steps - 1 - i : i];
-        const int passes = (i + 1 == steps) ? GOAL_REFINEMENT_PASSES : 1;
-        JointState js = poseToJointConfig(T_abs, passes, have_seed ? &seed : nullptr, true);
+    // (3) Calculating approach leg
+    Eigen::VectorXd q;
+    for (std::size_t i = 0; i < leg_size; ++i) {
+
+        JointState js = poseToJointConfig(
+            goal_pose * final_leg_[i], // goal
+            (i + 1 == leg_size) ? GOAL_REFINEMENT_PASSES : 1, // passes or iterations
+            have_seed ? &seed : nullptr, // seed joint state
+            true // DLS based ik
+        );
+
         if (js.position.size() == 0) {
-            std::cout << "[VisualServoPlanner] " << (retreat ? "retreat" : "final-leg")
-                      << " IK failed; truncating" << std::endl;
+            std::clog << "[VisualServoPlanner] IK failed; truncating" << std::endl;
             break;
         }
 
-        std::tie(leg_q_, std::ignore, std::ignore) =
+        std::tie(q, std::ignore, std::ignore) =
             jointstate_to_vectors(js, model_);
 
-        joints.push_back(leg_q_);
+        approach_leg_.push_back(q);
         seed = js;
         have_seed = true;
     }
 }
 
-JointTrajectory VisualServoPlanner::appendRetreat(
-    JointTrajectory traj,
-    const Eigen::VectorXd& goal_q,
-    const Eigen::MatrixXd& goal_pose,
-    double time_step,
-    double max_joint_vel,
-    double max_joint_acc
-) {
-    if (traj.position.empty() || traj.position.front().empty()) return {};
+std::pair<double, std::size_t> VisualServoPlanner::closestOnPath(const Eigen::VectorXd& q){
 
-    std::vector<Eigen::VectorXd> retreat_path{goal_q};
-    appendFinalLeg(goal_pose, retreat_path, true);
-    if (retreat_path.size() != final_leg_.size()) return {};
+    auto distance_to_segemnt = [](Eigen::VectorXd x, Eigen::VectorXd a, Eigen::VectorXd b){
+        if ((a-b).norm() < PATH_SEGMENT_EPS) return (x-a).norm();
 
-    JointTrajectory retreat_traj = timeParameterize(
-        retreat_path, time_step, max_joint_vel, max_joint_acc);
-    return concatenateTrajectories(std::move(traj), retreat_traj, GOAL_DELAY);
+        const double progress = (x-a).dot(b-a);
+        return (a + (b-a) * std::clamp(progress, 0.0, 1.0)).norm();
+    };
+
+    double tracking_drift = distance_to_segemnt(q, waypoints_[0], waypoints_[1]);
+    std::size_t rejoin_index = 0;
+
+    for (std::size_t i = 1; i < waypoints_.size() - 1; ++i) {
+        const double d = distance_to_segemnt(q, waypoints_[i], waypoints_[i+1]);
+        if (d < tracking_drift) {
+            tracking_drift = d;
+            rejoin_index = i+1;
+        }
+    }
+    return {tracking_drift, rejoin_index};
 }
 
 JointTrajectory
@@ -198,31 +206,88 @@ VisualServoPlanner::planFinalLegStep(
     const JointState& start_state,
     const Eigen::MatrixXd& goal_pose,
     std::size_t step,
+    int final_leg_steps,
     bool retreat,
     double time_step,
     double max_joint_vel,
     double max_joint_acc
 ) {
-    if (step == 0 || step >= final_leg_.size()) {
+    if (step == 0 || step >= final_leg_steps) {
         throw std::out_of_range("VisualServoPlanner::planFinalLegStep: step outside the final leg");
     }
-    setWall(goal_pose);
+
     Eigen::VectorXd start_q;
     std::tie(start_q, std::ignore, std::ignore) = jointstate_to_vectors(start_state, model_);
     start_q = start_q.cwiseMax(model_.lowerPositionLimit).cwiseMin(model_.upperPositionLimit);
 
-    // The start configuration seeds the IK so the step stays on the current branch.
-    const JointState seed = vectors_to_jointstate(
-        start_q, Eigen::VectorXd::Zero(model_.nv), Eigen::VectorXd::Zero(model_.nv), model_);
-    const bool at_goal = step + 1 == final_leg_.size();
     const JointState js = poseToJointConfig(
-        goal_pose * final_leg_[step], at_goal ? GOAL_REFINEMENT_PASSES : 1, &seed, true);
+        goal_pose * final_leg_[step], 
+        step + 1 == final_leg_steps ? GOAL_REFINEMENT_PASSES : 1, 
+        &start_state, 
+        true
+    );
     if (js.position.size() == 0) return {};
+
     Eigen::VectorXd step_q;
     std::tie(step_q, std::ignore, std::ignore) = jointstate_to_vectors(js, model_);
 
     JointTrajectory traj = timeParameterize({start_q, step_q}, time_step, max_joint_vel/2, max_joint_acc/4);
-    if (retreat) traj = appendRetreat(std::move(traj), step_q, goal_pose, time_step, max_joint_vel/2, max_joint_acc/4);
+
+    if (retreat) {
+        computeApproachLeg(goal_pose, final_leg_steps);
+        traj = concatenateTrajectories(traj, 
+            timeParameterize(
+                {approach_leg_.rbegin(), approach_leg_.rend()}, 
+                time_step, max_joint_vel/2, max_joint_acc/4
+            ),  
+            PREGRASP_DELAY
+        );
+    }
+    return traj;
+}
+
+std::vector<Eigen::VectorXd> VisualServoPlanner::constructPath(bool retreat) {
+    std::vector<Eigen::VectorXd> joints;
+    joints.insert(joints.end(), waypoints_.begin(), waypoints_.end());
+    joints.insert(joints.end(), approach_leg_.begin(), approach_leg_.end());
+    
+    if (retreat){
+        joints.insert(
+            joints.end(), 
+            std::make_reverse_iterator(approach_leg_.end()-1), 
+            std::make_reverse_iterator(approach_leg_.begin()) 
+        );
+    }
+    return joints;
+}
+
+JointTrajectory
+VisualServoPlanner::constructTrajectory(
+    bool retreat, double time_step,
+    double max_joint_vel, double max_joint_acc
+){
+    // (1) Parameterize the paths and build the trajectory
+    JointTrajectory traj = concatenateTrajectories(
+        timeParameterize(waypoints_, time_step, max_joint_vel, max_joint_acc), 
+        timeParameterize(approach_leg_, time_step, max_joint_vel/2, max_joint_acc/4),  
+        PREGRASP_DELAY
+    );
+
+    traj.lock_time = traj.time_step * traj.position.size();
+    
+    if (!retreat){
+        return traj;
+    }
+
+    // (2) Build retreat leg
+    traj = concatenateTrajectories(traj, 
+        timeParameterize(
+            {approach_leg_.rbegin(), approach_leg_.rend()}, 
+            time_step, max_joint_vel/2, max_joint_acc/4
+        ),  
+        PREGRASP_DELAY
+    );
+    
     return traj;
 }
 
@@ -231,25 +296,26 @@ std::vector<Eigen::VectorXd>,
 std::vector<Eigen::MatrixXd>>
 VisualServoPlanner::planPath(
     const JointState& start_state,
-    const Eigen::MatrixXd& goal_pose
+    const Eigen::MatrixXd& goal_pose,
+    int final_leg_steps,
+    bool retreat
 ) {
-    setWall(goal_pose);
-    Eigen::Matrix4d T_start = startPose(start_state);
-
-    double pos_dist = (goal_pose.block<3,1>(0,3) - T_start.block<3,1>(0,3)).norm();
-
-    std::vector<Eigen::VectorXd> joints;
-    if (pos_dist < DIRECT_APPROACH_DISTANCE) {
-        std::tie(joints, std::ignore) = JointSpacePlanner::planPath(start_state, goal_pose);
-    } else {
-        Eigen::MatrixXd intermediate_mat = goal_pose * intermediate_pose_offset_;
-        std::tie(joints, std::ignore) = JointSpacePlanner::planPath(start_state, intermediate_mat);
-        if (joints.empty()) return {};
-        appendFinalLeg(goal_pose, joints);
+    if (final_leg_steps > max_final_leg_steps_){
+        throw std::invalid_argument("Asked for more number of final steps than the max steps set at initialization");
     }
-    if (joints.empty()) return {};
 
-    appendFinalLeg(goal_pose, joints, true);
+    // (1) Compute first leg of the path
+    setWall(goal_pose);
+    (void) JointSpacePlanner::planPath(
+        start_state, goal_pose * intermediate_pose_offset_
+    );
+    if (waypoints_.empty()) return {};
+
+    // (2) Compute second leg of the path
+    computeApproachLeg(goal_pose, final_leg_steps);
+
+    //(3) Construct the output
+    std::vector<Eigen::VectorXd> joints = constructPath(retreat);
 
     return {joints, configsToPoses(joints)};
 }
@@ -258,184 +324,80 @@ JointTrajectory
 VisualServoPlanner::planTrajectory(
     const JointState& start_state,
     const Eigen::MatrixXd& goal_pose,
-    double time_step,
-    double max_joint_vel,
-    double max_joint_acc
+    int final_leg_steps, bool retreat,
+    double time_step, double max_joint_vel, double max_joint_acc
 ) {
-    setWall(goal_pose);
-    Eigen::Matrix4d T_start = startPose(start_state);
 
-    double pos_dist = (goal_pose.block<3,1>(0,3) - T_start.block<3,1>(0,3)).norm();
-
-    if (allow_direct_ && pos_dist < DIRECT_APPROACH_DISTANCE) {
-        JointTrajectory direct_traj = JointSpacePlanner::planTrajectory(
-            start_state, goal_pose, time_step, max_joint_vel, max_joint_acc);
-        if (waypoints_.empty()) return {};
-        JointTrajectory traj = appendRetreat(std::move(direct_traj), waypoints_.back(), goal_pose,
-                                             time_step, max_joint_vel/2, max_joint_acc/4);
-        traj.lock_time = 0.0;
-        return traj;
-    }
-
-    Eigen::MatrixXd intermediate_mat = goal_pose * intermediate_pose_offset_;
-
-    JointState intermediate_state = solveGoalConfig(intermediate_mat, start_state, PREGRASP_REFINEMENT_PASSES);
-    if (intermediate_state.position.size() == 0) return {};
-
-    (void) JointSpacePlanner::planPath(start_state, intermediate_state);
+    // Calculate the paths
+    (void) planPath(start_state, goal_pose, final_leg_steps);
     if (waypoints_.empty()) return {};
 
-    std::vector<Eigen::VectorXd> forward_path{waypoints_.back()};
-    appendFinalLeg(goal_pose, forward_path);
-    if (forward_path.size() != final_leg_.size() + 1) return {};
-
-    JointTrajectory search_traj = timeParameterize(
-        waypoints_, time_step, max_joint_vel, max_joint_acc);
-    JointTrajectory forward_traj = timeParameterize(
-        forward_path, time_step, max_joint_vel/2, max_joint_acc/4);
-    const double lock_time = finalLegStart(search_traj, time_step);
-    JointTrajectory traj = appendRetreat(
-        concatenateTrajectories(std::move(search_traj), forward_traj, PREGRASP_DELAY),
-        forward_path.back(), goal_pose, time_step, max_joint_vel/2, max_joint_acc/4);
-    if (traj.position.empty()) return {};
-    traj.lock_time = lock_time;
-
-    last_search_ = waypoints_;
+    // update state
     last_goal_pose_ = goal_pose;
-    last_start_q_ = waypoints_.front();
     last_plan_left_ = left_arm_;
-    last_plan_valid_ = true;
+    last_plan_valid_ = true;    
 
-    return traj;
+    // Construct output and return
+    return constructTrajectory(retreat, time_step, max_joint_vel, max_joint_acc);
+    
 }
 
 JointTrajectory
 VisualServoPlanner::replanTrajectory(
     const JointState& start_state,
     const Eigen::MatrixXd& goal_pose,
+    int final_leg_steps,
+    bool retreat,
     double time_step,
     double max_joint_vel,
     double max_joint_acc
 ) {
-    setWall(goal_pose);
-    const Eigen::Matrix4d goal4 = goal_pose;
 
-    const char* reason = nullptr;
-    double goal_drift = 0.0;
-    double start_drift = 0.0;
-    std::size_t rejoin_index = 0;
-    Eigen::VectorXd rejoin_q;
-    Eigen::VectorXd start_vel;
-
-    if (!last_plan_valid_ || last_search_.empty()) {
-        reason = "no plan to reuse";
-    } else if (last_plan_left_ != left_arm_) {
-        reason = "other arm";
-    } else {
-        goal_drift =
-            (goal4.block<3,1>(0,3) - last_goal_pose_.block<3,1>(0,3)).norm();
-
-        if (!poseNear(last_goal_pose_, goal4, REPLAN_LOCAL_POS, REPLAN_LOCAL_ROT)) {
-            reason = "goal moved too far";
-        } else {
-            Eigen::VectorXd start_q;
-            Eigen::VectorXd vel;
-            std::tie(start_q, vel, std::ignore) =
-                jointstate_to_vectors(start_state, model_);
-            start_q = start_q.cwiseMax(model_.lowerPositionLimit)
-                             .cwiseMin(model_.upperPositionLimit);
-
-            if (last_start_q_.size() != start_q.size()) {
-                reason = "configuration size changed";
-            } else {
-                start_drift = (start_q - last_search_.front()).norm();
-                rejoin_index = 0;
-
-                for (std::size_t i = 0; i + 1 < last_search_.size(); ++i) {
-                    const Eigen::VectorXd seg = last_search_[i + 1] - last_search_[i];
-                    const double seg_sq = seg.squaredNorm();
-
-                    double t = 0.0;
-                    if (seg_sq > PATH_SEGMENT_EPS) {
-                        t = (start_q - last_search_[i]).dot(seg) / seg_sq;
-                        t = std::min(std::max(t, 0.0), 1.0);
-                    }
-
-                    const double d =
-                        (start_q - (last_search_[i] + t * seg)).norm();
-                    if (d < start_drift) {
-                        start_drift = d;
-                        // Everything past this segment is still ahead of the arm.
-                        rejoin_index = i + 1;
-                    }
-                }
-
-                if (start_drift > REPLAN_PATH_DRIFT) {
-                    reason = "arm is not on the cached path";
-                } else if (start_drift > REJOIN_EPS
-                           && !motionValid(start_q, last_search_[rejoin_index])) {
-                    // Only the short hop back onto the path needs checking.
-                    // The path itself was validated when it was planned, and
-                    // re-checking it would cost more than the replan saves.
-                    reason = "rejoining the cached path is blocked";
-                } else {
-                    rejoin_q = start_q;
-                    start_vel = vel;
-                }
-            }
-        }
+    if (!last_plan_valid_
+        || waypoints_.empty()           // First plan
+        || last_plan_left_ != left_arm_ // Arm changed
+        || !poseNear(last_goal_pose_, goal_pose, REPLAN_LOCAL_POS, REPLAN_LOCAL_ROT) // Goal moved a lot
+        // || !poseNear(last_goal_pose_, goal_pose, approach_offset_, 3.14) // Away from pregrasp
+    ) {
+        return planTrajectory(
+            start_state, goal_pose, final_leg_steps, retreat,
+            time_step, max_joint_vel, max_joint_acc
+        );
     }
 
-    if (reason != nullptr) {
-        allow_direct_ = false;
-        JointTrajectory traj;
-        try {
-            traj = planTrajectory(start_state, goal_pose, time_step, max_joint_vel, max_joint_acc);
-        } catch (...) {
-            allow_direct_ = true;
-            throw;
-        }
-        allow_direct_ = true;
+    // Find closest point to exisitng path
+    Eigen::VectorXd start_q;
+    std::tie(start_q, std::ignore, std::ignore) = jointstate_to_vectors(start_state, model_);
+    start_q = start_q.cwiseMax(model_.lowerPositionLimit).cwiseMin(model_.upperPositionLimit);
 
-        std::cout << "[replanTrajectory] NOT tier 0 (" << reason
-                  << ") [goal drift " << goal_drift << " m / limit "
-                  << REPLAN_LOCAL_POS << ", arm drift " << start_drift
-                  << " rad / limit " << REPLAN_PATH_DRIFT << "]" << std::endl;
-        return traj;
+    auto [tracking_drift, rejoin_index] = closestOnPath(start_q); // _|_ perpendicular on path
+
+    if (rejoin_index == waypoints_.size()-1){
+        // TODO: Do something better close to the goal
+        waypoints_.clear();
+        computeApproachLeg(goal_pose, final_leg_steps);
+        return constructTrajectory(retreat, time_step, max_joint_vel, max_joint_acc);
     }
 
-    std::vector<Eigen::VectorXd> joints;
-    joints.reserve(last_search_.size() - rejoin_index + 1);
-    if ((rejoin_q - last_search_[rejoin_index]).norm() > REJOIN_EPS) joints.push_back(rejoin_q);
-    for (std::size_t i = rejoin_index; i < last_search_.size(); ++i) {
-        joints.push_back(last_search_[i]);
+    if (tracking_drift > REPLAN_PATH_DRIFT // Drifted too much from last path
+        || tracking_drift > REJOIN_EPS && !motionValid(start_q, waypoints_[rejoin_index]) // No free way back
+    ) {
+        return planTrajectory(
+            start_state, goal_pose, final_leg_steps, retreat,
+            time_step, max_joint_vel, max_joint_acc
+        );
+    }
+    
+    // Remove waypoints already crossed
+    waypoints_.erase(waypoints_.begin(), waypoints_.begin() + rejoin_index);
+    
+    if ((start_q - waypoints_.front()).norm() > REJOIN_EPS) {
+        waypoints_.insert(waypoints_.begin(), start_q);
     }
 
-    const std::size_t reused = joints.size();
-    if (joints.empty()) return {};
-
-    std::vector<Eigen::VectorXd> forward_path{joints.back()};
-    appendFinalLeg(goal4, forward_path);
-    if (forward_path.size() != final_leg_.size() + 1) return {};
-
-    JointTrajectory search_traj = timeParameterize(
-        joints, time_step, max_joint_vel, max_joint_acc, &start_vel);
-    JointTrajectory forward_traj = timeParameterize(
-        forward_path, time_step, max_joint_vel, max_joint_acc);
-    const double lock_time = finalLegStart(search_traj, time_step);
-    JointTrajectory traj = appendRetreat(
-        concatenateTrajectories(std::move(search_traj), forward_traj, PREGRASP_DELAY),
-        forward_path.back(), goal4, time_step, max_joint_vel, max_joint_acc);
-    if (traj.position.empty()) return {};
-    traj.lock_time = lock_time;
-
-    std::cout << "[replanTrajectory] tier 0, search reused"
-              << " [goal drift " << goal_drift
-              << " m, off path " << start_drift << " rad, rejoined "
-              << rejoin_index << "/" << last_search_.size() << ", " << reused
-              << " waypoints reused]" << std::endl;
-
-    return traj;
+    // Only computing the last leg again and build the output
+    computeApproachLeg(goal_pose, final_leg_steps);
+    return constructTrajectory(retreat, time_step, max_joint_vel, max_joint_acc);
 }
 
 } // namespace HumanoidPilot
