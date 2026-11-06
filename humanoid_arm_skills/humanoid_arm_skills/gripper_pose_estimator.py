@@ -1,0 +1,117 @@
+import os
+import threading
+
+import numpy as np
+import warp as wp
+
+import rclpy
+from rclpy.node import Node
+from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from ament_index_python.packages import get_package_share_directory
+
+from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import CameraInfo, Image
+
+import tf2_ros
+
+from humanoid_arm_skills.gripper_fit import GripperFit
+from humanoid_arm_skills.utils import quaternion_matrix
+
+
+class GripperPoseEstimator(Node):
+    def __init__(self):
+        super().__init__('gripper_pose_estimator')
+        self.declare_parameter('arm', 'right')
+        self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw')
+        self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
+        self.declare_parameter('pose_topic', 'gripper_pose')
+        self.declare_parameter('min_points', 500)
+        self.declare_parameter('min_inliers', 0.4)
+
+        side = self.get_parameter('arm').value
+        self.base_frame = f'{side}_dex1_base_link'
+        self.mesh_path = os.path.join(get_package_share_directory('humanoid_arm_skills'), 'meshes', f'{side}_dex1_closed.STL')
+        self.tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=10.0))
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.k = None
+        self.offset = np.zeros(3)
+        self.pending = None
+        self.wake = threading.Condition()
+        self.running = True
+
+        self.publisher = self.create_publisher(PoseStamped, self.get_parameter('pose_topic').value, 10)
+        self.create_subscription(CameraInfo, self.get_parameter('camera_info_topic').value, self._camera_info_cb, 1)
+        latest = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(Image, self.get_parameter('depth_topic').value, self._depth_cb, latest)
+        # Fits run on their own thread, so every Warp call shares one CUDA context and the executor never waits on the GPU
+        self.worker = threading.Thread(target=self._work, daemon=True)
+        self.worker.start()
+
+    # ========== Callbacks ==========
+    def _camera_info_cb(self, msg):
+        self.k = np.array(msg.k).reshape(3, 3)
+
+    def _depth_cb(self, msg):
+        with self.wake:
+            self.pending = msg
+            self.wake.notify()
+
+    # ========== Fit ==========
+    def _work(self):
+        wp.init()
+        fitter = GripperFit(self.mesh_path)
+        self.get_logger().info(f'gripper_pose_estimator: ready ({self.base_frame}, {len(fitter.plan)} passes per frame)')
+        while self.running:
+            with self.wake:
+                while self.pending is None and self.running:
+                    self.wake.wait(timeout=0.5)
+                msg, self.pending = self.pending, None
+            if msg is not None and self.k is not None:
+                self._fit(fitter, msg)
+
+    def _fit(self, fitter, msg):
+        # (1) The encoder pose of the gripper in the depth camera at the image's own stamp
+        try:
+            transform = self.tf_buffer.lookup_transform(msg.header.frame_id, self.base_frame, rclpy.time.Time.from_msg(msg.header.stamp))
+        except tf2_ros.TransformException:
+            return
+        q, p = transform.transform.rotation, transform.transform.translation
+        camera_from_base = np.eye(4)
+        camera_from_base[:3, :3] = quaternion_matrix(np.array([q.x, q.y, q.z, q.w]))
+        camera_from_base[:3, 3] = [p.x, p.y, p.z]
+
+        # (2) Translation-only fit, warm-started from the last accepted offset
+        depth = np.frombuffer(msg.data, np.uint16).reshape(msg.height, msg.width)
+        fit = fitter.fit(depth, self.k, camera_from_base, self.offset)
+        if fit is None or fit['points'] < self.get_parameter('min_points').value:
+            return
+        if fit['inliers'] < self.get_parameter('min_inliers').value:
+            return
+        self.offset = fit['offset']
+
+        # (3) The encoder orientation with the fitted position, in the camera frame
+        pose = PoseStamped()
+        pose.header = msg.header
+        pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = (camera_from_base[:3, 3] + self.offset).tolist()
+        pose.pose.orientation = q
+        self.publisher.publish(pose)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = GripperPoseEstimator()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.running = False
+        node.worker.join(timeout=1.0)
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+if __name__ == '__main__':
+    main()
