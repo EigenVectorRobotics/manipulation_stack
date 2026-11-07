@@ -8,7 +8,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import qos_profile_sensor_data
 from ament_index_python.packages import get_package_share_directory
 
 from geometry_msgs.msg import PoseStamped
@@ -43,8 +43,8 @@ class GripperPoseEstimator(Node):
 
         self.publisher = self.create_publisher(PoseStamped, self.get_parameter('pose_topic').value, 10)
         self.create_subscription(CameraInfo, self.get_parameter('camera_info_topic').value, self._camera_info_cb, 1)
-        latest = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST, reliability=ReliabilityPolicy.BEST_EFFORT)
-        self.create_subscription(Image, self.get_parameter('depth_topic').value, self._depth_cb, latest)
+        # A one-deep best-effort reader starves on large images under load; _depth_cb already keeps only the newest frame
+        self.create_subscription(Image, self.get_parameter('depth_topic').value, self._depth_cb, qos_profile_sensor_data)
         # Fits run on their own thread, so every Warp call shares one CUDA context and the executor never waits on the GPU
         self.worker = threading.Thread(target=self._work, daemon=True)
         self.worker.start()
