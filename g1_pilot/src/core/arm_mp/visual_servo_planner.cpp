@@ -48,6 +48,11 @@ JointTrajectory concatenateTrajectories(
 ) {
     JointTrajectory out;
     out.name = first.name;
+    out.time_step = first.time_step;
+    out.lock_time = first.lock_time;
+    out.position.resize(first.name.size());
+    out.velocity.resize(first.name.size());
+    out.acceleration.resize(first.name.size());
 
     if (!std::isfinite(delay) || delay < 0.0 ||
         (delay > 0.0 && (!std::isfinite(first.time_step) || first.time_step <= 0.0))) {
@@ -250,7 +255,8 @@ std::vector<Eigen::VectorXd> VisualServoPlanner::constructPath(bool retreat) {
     std::vector<Eigen::VectorXd> joints;
     joints.insert(joints.end(), waypoints_.begin(), waypoints_.end());
     joints.insert(joints.end(), approach_leg_.begin(), approach_leg_.end());
-    
+    if (approach_leg_.empty()) return joints;
+
     if (retreat){
         joints.insert(
             joints.end(), 
@@ -267,13 +273,15 @@ VisualServoPlanner::constructTrajectory(
     double max_joint_vel, double max_joint_acc
 ){
     // (1) Parameterize the paths and build the trajectory
-    JointTrajectory traj = concatenateTrajectories(
-        timeParameterize(waypoints_, time_step, max_joint_vel, max_joint_acc), 
-        timeParameterize(approach_leg_, time_step, max_joint_vel/2, max_joint_acc/4),  
-        PREGRASP_DELAY
-    );
+    if (approach_leg_.empty()) return {};
+    JointTrajectory traj = timeParameterize(approach_leg_, time_step, max_joint_vel/2, max_joint_acc/4);
+    if (!waypoints_.empty()) {
+        traj = concatenateTrajectories(
+            timeParameterize(waypoints_, time_step, max_joint_vel, max_joint_acc), traj, PREGRASP_DELAY);
+    }
 
-    traj.lock_time = traj.time_step * traj.position.size();
+    // The target locks when the final leg starts
+    traj.lock_time = traj.time_step * (traj.position.front().size() - approach_leg_.size());
     
     if (!retreat){
         return traj;
