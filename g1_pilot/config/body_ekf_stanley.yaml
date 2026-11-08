@@ -35,8 +35,8 @@ body_ekf:
     sig_leg_tilt_deg: 1.0
     sig_leg_yaw_deg: 1.0
     sig_bias_walk: 1.0e-5
-    gyro_density_pelvis: 0.0       # <= 0: measured on the startup still period
-    gyro_density_torso: 0.0
+    gyro_density_pelvis: 2.3e-4    # <= 0: measured on the startup still period
+    gyro_density_torso: 2.1e-4
     gyro_density_sensor: 0.0
 
     # Startup still period
