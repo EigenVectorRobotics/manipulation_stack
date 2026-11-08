@@ -41,6 +41,7 @@ def generate_launch_description():
         name='joint_state_publisher',
         parameters=[{
             'source_list': ['/feedback'],
+            'rate': 200,
         }],
         remappings=[('joint_states', 'js_feedback')]
     ))
