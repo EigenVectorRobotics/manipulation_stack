@@ -1,5 +1,7 @@
 #include "core/body_ekf/body_ekf.h"
 
+#include <g1_pilot/g1_pilot.h>
+
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -76,14 +78,23 @@ JointState joint_state(const std::vector<std::string>& names, const std::vector<
     return state;
 }
 
-std::unique_ptr<BodyAttitudeEstimator> make_estimator(
-    const std::string& asset_root, const std::string& config_file, const Meta& meta)
-{
+std::shared_ptr<Humanoid> make_humanoid(const std::string& asset_root, const std::string& config_file) {
     RobotConfig cfg;
     cfg.asset_root = asset_root;
     cfg.asset_file = asset_root + "/g1_29dof_with_hand_rev_1_0.urdf";
     cfg.config_file = config_file;
-    const BodyConfig robot = make_body_config({}, {}, {});
+    return std::make_shared<Humanoid>(&cfg);
+}
+
+// The node looks these up on TF; offline they come from FK on the recorded joints.
+Relations fk_relations(Humanoid& humanoid, const JointState& joints) {
+    const BodyConfig robot;
+    return make_relations(humanoid.frame_transform(joints, robot.base_link, robot.torso_link),
+                          humanoid.frame_transform(joints, robot.foot_link, robot.base_link),
+                          humanoid.frame_transform(joints, robot.other_foot_link, robot.base_link));
+}
+
+std::unique_ptr<BodyAttitudeEstimator> make_estimator(const Meta& meta) {
     EKFParams params;
     const auto densities = numbers(meta, "gyro_densities");
     params.gyro_density_pelvis = densities.at(0);
@@ -93,7 +104,7 @@ std::unique_ptr<BodyAttitudeEstimator> make_estimator(
     params.use_camera_imu = camera.empty() || camera[0] != 0.0;
     const auto r = numbers(meta, "R_torso_sensor");
     const Eigen::Matrix3d R_torso_sensor = Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(r.data());
-    return std::make_unique<BodyAttitudeEstimator>(std::make_shared<Humanoid>(&cfg), robot, R_torso_sensor, params);
+    return std::make_unique<BodyAttitudeEstimator>(R_torso_sensor, params);
 }
 
 void write_row(std::FILE* out, int64_t t, const Eigen::Matrix4d& T) {
@@ -107,8 +118,8 @@ void write_row(std::FILE* out, int64_t t, const Eigen::Matrix4d& T) {
 }
 
 // Grid CSV columns: t, gyro_p, gyro_t, gyro_s, acc_p, acc_t, acc_s, joint positions (meta joint_names order).
-void run_grid(std::unique_ptr<BodyAttitudeEstimator> estimator, const Meta& meta, const std::string& csv,
-              std::FILE* out)
+void run_grid(std::unique_ptr<BodyAttitudeEstimator> estimator, Humanoid& humanoid, const Meta& meta,
+              const std::string& csv, std::FILE* out)
 {
     // (1) Grid samples and the still hold used for calibration.
     const auto names = strings(meta, "joint_names");
@@ -123,7 +134,7 @@ void run_grid(std::unique_ptr<BodyAttitudeEstimator> estimator, const Meta& meta
         s.acc_p = vec3(row, 10);
         s.acc_t = vec3(row, 13);
         s.acc_s = vec3(row, 16);
-        s.joints = joint_state(names, row, 19);
+        s.rel = fk_relations(humanoid, joint_state(names, row, 19));
         samples.push_back(s);
         if (s.t >= window.at(0) && s.t <= window.at(1)) {
             hold.push_back(s);
@@ -138,17 +149,29 @@ void run_grid(std::unique_ptr<BodyAttitudeEstimator> estimator, const Meta& meta
 }
 
 // Message CSVs: joints (t, position, velocity) and pelvis, torso, camera IMUs (t, gyro, acc), merged by stamp.
-void run_online(std::unique_ptr<BodyAttitudeEstimator> estimator, const Meta& meta,
+void run_online(std::unique_ptr<BodyAttitudeEstimator> estimator, Humanoid& humanoid, const Meta& meta,
                 const std::vector<std::string>& csvs, std::FILE* out)
 {
-    // (1) Streams and the on-line estimator.
+    // (1) Streams, the joint history standing in for the TF buffer, and the on-line estimator.
     const auto names = strings(meta, "joint_names");
     const auto still = numbers(meta, "online_still");
     std::vector<Table> streams;
     for (const auto& csv : csvs) {
         streams.push_back(read_csv(csv));
     }
-    OnlineBodyEstimator online(std::move(estimator), still.at(0), still.at(1));
+    SampleBuffer joints(10.0);
+    auto lookup = [&](int64_t t, Relations& rel) {
+        if (joints.empty() || t > joints.latest()) {
+            return Lookup::Wait;
+        }
+        if (t < joints.oldest()) {
+            return Lookup::Missing;
+        }
+        const Eigen::VectorXd q = joints.interp(t);
+        rel = fk_relations(humanoid, joint_state(names, std::vector<double>(q.data(), q.data() + q.size()), 0));
+        return Lookup::Found;
+    };
+    OnlineBodyEstimator online(std::move(estimator), lookup, still.at(0), still.at(1));
 
     // (2) Feed messages in stamp order (ties: joints, pelvis, torso, camera), as the node receives them.
     std::vector<std::size_t> next(streams.size(), 0);
@@ -164,7 +187,7 @@ void run_online(std::unique_ptr<BodyAttitudeEstimator> estimator, const Meta& me
         }
         const auto& r = streams[s][next[s]++];
         const auto t = static_cast<int64_t>(r[0]);
-        if (s == 0) online.add_joint_state(t, joint_state(names, r, 1));
+        if (s == 0) joints.append(t, Eigen::Map<const Eigen::VectorXd>(r.data() + 1, names.size()));
         if (s == 1) online.add_imu(Body::Pelvis, t, vec3(r, 1), vec3(r, 4));
         if (s == 2) online.add_imu(Body::Torso, t, vec3(r, 1), vec3(r, 4));
         if (s == 3) online.add_imu(Body::Camera, t, vec3(r, 1), vec3(r, 4));
@@ -187,12 +210,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     const Meta meta = read_meta(args[3]);
-    auto estimator = make_estimator(args[1], args[2], meta);
+    auto estimator = make_estimator(meta);
+    const auto humanoid = make_humanoid(args[1], args[2]);
     std::FILE* out = std::fopen(args.back().c_str(), "w");
     if (grid) {
-        run_grid(std::move(estimator), meta, args[4], out);
+        run_grid(std::move(estimator), *humanoid, meta, args[4], out);
     } else {
-        run_online(std::move(estimator), meta, {args[4], args[5], args[6], args[7]}, out);
+        run_online(std::move(estimator), *humanoid, meta, {args[4], args[5], args[6], args[7]}, out);
     }
     std::fclose(out);
     return 0;

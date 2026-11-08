@@ -1,12 +1,11 @@
 #include "core/body_ekf/body_ekf.h"
 
 #include "rclcpp/rclcpp.hpp"
-#include <ament_index_cpp/get_package_share_directory.hpp>
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "sensor_msgs/msg/imu.hpp"
-#include "sensor_msgs/msg/joint_state.hpp"
 #include "std_srvs/srv/trigger.hpp"
+#include <tf2/exceptions.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
@@ -37,19 +36,11 @@ public:
             var = this->declare_parameter<std::string>(param, default_val);
         };
 
-        // (1) Humanoid model, robot configuration and noise.
-        std::string description_share = ament_index_cpp::get_package_share_directory("g1_description");
-        std::string g1_pilot_share = ament_index_cpp::get_package_share_directory("g1_pilot");
-        RobotConfig config;
-        string_param(config.asset_file, "asset_file", description_share + "/assets/g1/g1_29dof_with_hand_rev_1_0.urdf");
-        string_param(config.asset_root, "asset_root", description_share + "/assets/g1/");
-        string_param(config.config_file, "config_file", g1_pilot_share + "/config/g1.yaml");
-        
-        humanoid_ = std::make_shared<Humanoid>(&config);
+        // (1) Robot configuration and noise.
         robot_ = declare_robot_();
         params_ = declare_ekf_params_();
         calibration_duration_ = this->declare_parameter<double>("calibration_duration", 2.0);
-        still_threshold_ = this->declare_parameter<double>("still_threshold", 0.15);
+        still_threshold_ = this->declare_parameter<double>("still_threshold", 0.05);
 
         // (2) Frames, output options and TF.
         tf_decimation_ = std::max<int64_t>(1, this->declare_parameter<int64_t>("tf_decimation", 1));
@@ -64,13 +55,11 @@ public:
         string_param(camera_imu_frame_, "camera_imu_frame", "camera_imu_optical_frame");
         string_param(pelvis_imu_topic_, "pelvis_imu_topic", "/pelvis_imu");
         string_param(torso_imu_topic_, "torso_imu_topic", "/torso_imu");
-        string_param(joint_states_topic_, "joint_states_topic", "/feedback");
         string_param(torso_pose_topic_, "torso_pose_topic", "/body_ekf/torso_pose");
 
         // (3) Publishers and subscribers.
         const auto qos = rclcpp::SensorDataQoS();
         torso_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(torso_pose_topic_, 5);
-        joint_sub_ = encoder_subscription_(joint_states_topic_);
         pelvis_imu_sub_ = imu_subscription_(pelvis_imu_topic_, Body::Pelvis);
         torso_imu_sub_ = imu_subscription_(torso_imu_topic_, Body::Torso);
         reset_srv_ = this->create_service<std_srvs::srv::Trigger>("~/reset",
@@ -102,12 +91,11 @@ public:
     }
 
 private:
-    // Model and estimator
-    std::shared_ptr<Humanoid> humanoid_;
+    // Estimator
     BodyConfig robot_;
     EKFParams params_;
     double calibration_duration_ = 2.0;
-    double still_threshold_ = 0.15;
+    double still_threshold_ = 0.05;
     std::unique_ptr<OnlineBodyEstimator> estimator_;
 
     // Frames and output options
@@ -126,14 +114,12 @@ private:
 
     // Publishers and subscribers
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr torso_pub_;
-    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr pelvis_imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr torso_imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr camera_imu_sub_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_srv_;
     std::string pelvis_imu_topic_;
     std::string torso_imu_topic_;
-    std::string joint_states_topic_;
     std::string torso_pose_topic_;
 
     BodyConfig declare_robot_()
@@ -180,8 +166,42 @@ private:
     void start_estimator_(const Eigen::Matrix3d& R_torso_sensor)
     {
         estimator_ = std::make_unique<OnlineBodyEstimator>(
-            std::make_unique<BodyAttitudeEstimator>(humanoid_, robot_, R_torso_sensor, params_),
+            std::make_unique<BodyAttitudeEstimator>(R_torso_sensor, params_),
+            [this](int64_t t, Relations& rel) { return lookup_relations_(t, rel); },
             calibration_duration_, still_threshold_);
+    }
+
+    Eigen::Matrix4d transform_(const std::string& target, const std::string& source, const tf2::TimePoint& stamp)
+    {
+        return to_matrix(tf_buffer_->lookupTransform(target, source, stamp).transform);
+    }
+
+    // Encoder kinematics from robot_state_publisher's TF; a stamp older than the TF history is never resolved.
+    Lookup lookup_relations_(int64_t t, Relations& rel)
+    {
+        const tf2::TimePoint stamp{std::chrono::nanoseconds(t)};
+        try {
+            rel = make_relations(transform_(robot_.base_link, robot_.torso_link, stamp),
+                                 transform_(robot_.foot_link, robot_.base_link, stamp),
+                                 transform_(robot_.other_foot_link, robot_.base_link, stamp));
+            return Lookup::Found;
+        } catch (const tf2::ExtrapolationException&) {
+            return before_encoder_history_(t) ? Lookup::Missing : Lookup::Wait;
+        } catch (const tf2::TransformException& e) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Encoder TF not available yet: %s",
+                                 e.what());
+            return Lookup::Wait;
+        }
+    }
+
+    bool before_encoder_history_(int64_t t)
+    {
+        try {
+            const auto latest = tf_buffer_->lookupTransform(robot_.foot_link, robot_.torso_link, tf2::TimePointZero);
+            return rclcpp::Time(latest.header.stamp).nanoseconds() > t;
+        } catch (const tf2::TransformException&) {
+            return false;
+        }
     }
 
     // Pelvis and torso IMU axes are taken as the pelvis and torso link axes.
@@ -204,22 +224,6 @@ private:
             });
     }
 
-    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr encoder_subscription_(const std::string topic)
-    {
-        return this->create_subscription<sensor_msgs::msg::JointState>(topic, rclcpp::SensorDataQoS(),
-            [this](const sensor_msgs::msg::JointState::SharedPtr msg){
-                if (!estimator_) {
-                    return;
-                }
-                estimator_->add_joint_state(
-                    rclcpp::Time(msg->header.stamp).nanoseconds(), 
-                    JointState{msg->name, msg->position, msg->velocity, {}}
-                );
-                process_();
-            }
-        );
-    }
-
     void process_()
     {
         const ProcessReport report = estimator_->process();
@@ -231,11 +235,11 @@ private:
         }
         if (report.dropped > 0) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                "Dropping grid samples older than the joint / IMU history (check sensor clocks)");
+                "Dropping grid samples older than the IMU / encoder TF history (check sensor clocks)");
         }
         if (report.camera_ahead) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                "Camera IMU stamps are >1 s ahead of the joint stamps (check sensor clocks)");
+                "Camera IMU stamps are >1 s ahead of the torso IMU stamps (check sensor clocks)");
         }
         for (const auto& output : report.outputs) {
             publish_(output);

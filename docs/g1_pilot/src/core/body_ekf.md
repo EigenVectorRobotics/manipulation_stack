@@ -7,12 +7,12 @@
 | File | Responsibility |
 |---|---|
 | `body_ekf.h` | Declares `Body2EKF`, the per-robot `BodyConfig`, `BodyAttitudeEstimator`, the resampling buffer, the still collector and `OnlineBodyEstimator`. |
-| `body_ekf.cpp` | Implements the 15-state multiplicative EKF, still-period calibration and on-line resampling on a 200 Hz grid (camera-IMU or torso-IMU stamps). Kinematics come from `Humanoid::frame_transform` on the full model. |
+| `body_ekf.cpp` | Implements the 15-state multiplicative EKF, still-period calibration and on-line resampling on a 200 Hz grid (camera-IMU or torso-IMU stamps). Leg and waist relations come from a lookup at each grid stamp, and their rate of change detects the still period. |
 
 ## Node
 
-`src/body_ekf.cpp` reads a `sensor_msgs/JointState` topic (`/feedback`) and `sensor_msgs/Imu` topics for the pelvis and torso. With `use_camera_imu: true` it also fuses the camera IMU. It publishes `foot_world -> tf_root_frame` at 200 Hz and the torso pose on `/body_ekf/torso_pose`. Per-robot values live in `config/body_ekf_{stanley,patricia}.yaml`.
+`src/body_ekf.cpp` reads `sensor_msgs/Imu` topics for the pelvis and torso and looks up `pelvis <- torso_link` and `<foot> <- pelvis` on TF from `robot_state_publisher`, whose `joint_state_publisher` must run at 200 Hz. With `use_camera_imu: true` it also fuses the camera IMU. It publishes `foot_world -> tf_root_frame` at 200 Hz and the torso pose on `/body_ekf/torso_pose`. Per-robot values live in `config/body_ekf_{stanley,patricia}.yaml`.
 
 ## Testing
 
-`test_body_ekf` covers the filter, `Humanoid` kinematics, buffers and an on-line run on a still robot. `body_ekf_replay` runs exported bag data through the core for comparison with the Python reference.
+`test_body_ekf` covers the filter, TF-URDF kinematics, the relation speed, buffers and on-line runs with a lagging encoder TF. `body_ekf_replay` runs exported bag data through the core, with relations from FK on the recorded joints.
