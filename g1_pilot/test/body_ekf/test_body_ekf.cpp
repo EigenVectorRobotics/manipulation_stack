@@ -230,10 +230,11 @@ TEST(BodyEKF, StillCollectorRestartsOnMotion) {
 struct StillRun {
     std::vector<GridOutput> outputs;
     bool calibrated = false;
+    int calibrations = 0;
     Relations rel;
 };
 
-StillRun run_still_robot(bool use_camera_imu) {
+StillRun run_still_robot(bool use_camera_imu, int reset_ms = -1) {
     // (1) Synthetic still robot: level foot, waist pitched forward, camera IMU equal to the torso IMU.
     EKFParams params;
     params.use_camera_imu = use_camera_imu;
@@ -261,8 +262,12 @@ StillRun run_still_robot(bool use_camera_imu) {
         if (ms % 5 == 0) {
             online.add_imu(Body::Camera, t, bias + jitter(2e-3), R_t.transpose() * EZ * 9.81 + jitter(0.02));
         }
+        if (ms == reset_ms) {
+            online.reset();
+        }
         const ProcessReport report = online.process();
         run.calibrated = run.calibrated || report.calibrated;
+        run.calibrations += report.calibrated ? 1 : 0;
         run.outputs.insert(run.outputs.end(), report.outputs.begin(), report.outputs.end());
     }
     return run;
@@ -281,4 +286,17 @@ TEST(BodyEKF, OnlineEstimatorTracksStaticRobot) {
             EXPECT_EQ(run.outputs[k].t - run.outputs[k - 1].t, 5000000);
         }
     }
+}
+
+TEST(BodyEKF, OnlineEstimatorRecalibratesAfterReset) {
+    const StillRun run = run_still_robot(false, 1500);
+    ASSERT_EQ(run.calibrations, 2);
+    EXPECT_LT(angle_deg(run.outputs.back().T_foot_torso.topLeftCorner<3, 3>(), run.rel.L * run.rel.W), 0.5);
+    // Output stops at the reset and resumes after a fresh 0.5 s still period.
+    int64_t gap = 0;
+    for (std::size_t k = 1; k < run.outputs.size(); ++k) {
+        gap = std::max(gap, run.outputs[k].t - run.outputs[k - 1].t);
+    }
+    EXPECT_GE(gap, 500000000);
+    EXPECT_GT(run.outputs.back().t, 2900000000);
 }

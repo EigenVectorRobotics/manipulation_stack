@@ -335,6 +335,12 @@ void BodyAttitudeEstimator::initialize(const std::vector<GridSample>& still, con
     step_ = 0;
 }
 
+void BodyAttitudeEstimator::reset() {
+    ekf_.reset();
+    last_.reset();
+    step_ = 0;
+}
+
 Eigen::Matrix4d BodyAttitudeEstimator::step(const GridSample& sample) {
     const auto& p = params_;
     const auto& c = calibration_;
@@ -462,6 +468,11 @@ bool StillPeriodCollector::add(const GridSample& sample, double joint_speed) {
     return rows_.size() >= required_;
 }
 
+void StillPeriodCollector::clear() {
+    speeds_.clear();
+    rows_.clear();
+}
+
 OnlineBodyEstimator::OnlineBodyEstimator(
     std::unique_ptr<BodyAttitudeEstimator> estimator,
     double calibration_duration,
@@ -470,6 +481,11 @@ OnlineBodyEstimator::OnlineBodyEstimator(
    collector_(calibration_duration, still_threshold, STILL_SMOOTH_SAMPLES, estimator_->params().grid_period),
    window_(estimator_->params().resample_window)
 { }
+
+void OnlineBodyEstimator::reset() {
+    estimator_->reset();
+    collector_.clear();
+}
 
 void OnlineBodyEstimator::add_joint_state(int64_t t, const JointState& state) {
     const std::size_t n = state.name.size();
