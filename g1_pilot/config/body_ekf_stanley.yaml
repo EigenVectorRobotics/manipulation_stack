@@ -3,8 +3,7 @@ body_ekf:
   ros__parameters:
     robot_name: stanley
 
-    # Inputs: sensor_msgs/JointState (URDF joint names) and sensor_msgs/Imu; pelvis / torso IMU axes = link axes
-    joint_states_topic: /feedback
+    # Inputs: sensor_msgs/Imu (pelvis / torso IMU axes = link axes) and the encoder TF from robot_state_publisher
     pelvis_imu_topic: /pelvis_imu
     torso_imu_topic: /torso_imu
     camera_imu_topic: /camera/camera/imu
@@ -27,7 +26,7 @@ body_ekf:
     camera_mount_xyz: [0.081099, 0.023467, 0.414921]
     camera_mount_rpy_deg: [-0.326357, 18.371376, -1.592364]
 
-    # Encoder offsets are applied in unitree_interface (config/stanley.yaml), so /feedback is already corrected
+    # Encoder offsets are applied in unitree_interface (config/stanley.yaml), so the encoder TF is already corrected
 
     # EKF noise (shared tuning)
     sig_acc_deg: 3.0
@@ -41,4 +40,4 @@ body_ekf:
 
     # Startup still period
     calibration_duration: 2.0
-    still_threshold: 0.3
+    still_threshold: 0.13          # rad/s, summed rotation rate of the waist and both legs (TF)

@@ -20,8 +20,6 @@ constexpr int BS = 12;
 constexpr std::size_t MAX_PENDING_IMU = 400;
 constexpr std::size_t STILL_SMOOTH_SAMPLES = 40;
 constexpr int64_t CAMERA_AHEAD_NS = 1000000000;
-// Substrings naming the leg and waist joints whose speeds decide stillness.
-const std::vector<std::string> STILL_JOINT_KEYS = {"hip", "knee", "ankle", "waist"};
 const Eigen::Vector3d EZ = Eigen::Vector3d::UnitZ();
 
 Eigen::Matrix3d skew(const Eigen::Vector3d& v) {
@@ -120,11 +118,6 @@ StillCalibration calibrate_still(
         sensor ? gyro_density(gyro_s, params.gyro_density_sensor, params.fallback_density_sensor, params.grid_period)
                : std::numeric_limits<double>::infinity());
     return c;
-}
-
-bool is_still_joint(const std::string& name) {
-    return std::any_of(STILL_JOINT_KEYS.begin(), STILL_JOINT_KEYS.end(),
-                       [&](const std::string& key) { return name.find(key) != std::string::npos; });
 }
 
 } // anonymous namespace
@@ -279,19 +272,29 @@ BodyConfig make_body_config(
     return robot;
 }
 
+Relations make_relations(
+    const Eigen::Matrix4d& T_base_torso,
+    const Eigen::Matrix4d& T_foot_base,
+    const Eigen::Matrix4d& T_other_foot_base
+){
+    return {T_base_torso.topLeftCorner<3, 3>(), T_foot_base.topLeftCorner<3, 3>(), T_foot_base * T_base_torso,
+            T_other_foot_base.topLeftCorner<3, 3>()};
+}
+
+double relation_speed(const Relations& a, const Relations& b, double dt) {
+    if (dt <= 0.0) {
+        return 0.0;
+    }
+    const double angle = so3_log(a.W.transpose() * b.W).norm() + so3_log(a.L.transpose() * b.L).norm()
+                       + so3_log(a.L_other.transpose() * b.L_other).norm();
+    return angle / dt;
+}
+
 BodyAttitudeEstimator::BodyAttitudeEstimator(
-    std::shared_ptr<Humanoid> humanoid,
-    const BodyConfig& robot,
     const Eigen::Matrix3d& R_torso_sensor,
     const EKFParams& params
-): humanoid_(std::move(humanoid)), robot_(robot), R_ts_(R_torso_sensor), params_(params)
+): R_ts_(R_torso_sensor), params_(params)
 { }
-
-Relations BodyAttitudeEstimator::relations(const JointState& joints) {
-    const Eigen::Matrix4d T_base_torso = humanoid_->frame_transform(joints, robot_.base_link, robot_.torso_link);
-    const Eigen::Matrix4d T_foot_base = humanoid_->frame_transform(joints, robot_.foot_link, robot_.base_link);
-    return {T_base_torso.topLeftCorner<3, 3>(), T_foot_base.topLeftCorner<3, 3>(), T_foot_base * T_base_torso};
-}
 
 Eigen::Vector3d BodyAttitudeEstimator::sensor_up(const Eigen::Vector3d& acc_s) const {
     return (R_ts_ * acc_s).normalized();
@@ -308,7 +311,7 @@ void BodyAttitudeEstimator::initialize(const std::vector<GridSample>& still, con
         up_p.push_back(s.acc_p.normalized());
         up_t.push_back(s.acc_t.normalized());
         up_s.push_back(sensor_up(s.acc_s));
-        rel.push_back(relations(s.joints));
+        rel.push_back(s.rel);
     }
     calibration_ = calibrate_still(gyro_p, gyro_t, gyro_s, up_p, up_t, up_s, rel, params_);
 
@@ -321,7 +324,7 @@ void BodyAttitudeEstimator::initialize(const std::vector<GridSample>& still, con
         mean_up_p += head[k].acc_p.normalized() / static_cast<double>(n);
         mean_up_t += head[k].acc_t.normalized() / static_cast<double>(n);
     }
-    const Relations rel0 = relations(head.front().joints);
+    const Relations& rel0 = head.front().rel;
 
     // (3) Filter.
     const auto& p = params_;
@@ -345,7 +348,7 @@ Eigen::Matrix4d BodyAttitudeEstimator::step(const GridSample& sample) {
     const auto& p = params_;
     const auto& c = calibration_;
     Body2EKF& f = *ekf_;
-    const Relations rel = relations(sample.joints);
+    const Relations& rel = sample.rel;
     if (last_) {
         f.propagate(last_->gyro_p, last_->gyro_t, last_->gyro_s, static_cast<double>(sample.t - last_->t) * 1e-9);
     }
@@ -454,8 +457,8 @@ StillPeriodCollector::StillPeriodCollector(
    threshold_(threshold), smooth_samples_(smooth_samples)
 { }
 
-bool StillPeriodCollector::add(const GridSample& sample, double joint_speed) {
-    speeds_.push_back(joint_speed);
+bool StillPeriodCollector::add(const GridSample& sample, double speed) {
+    speeds_.push_back(speed);
     if (speeds_.size() > smooth_samples_) {
         speeds_.pop_front();
     }
@@ -475,9 +478,10 @@ void StillPeriodCollector::clear() {
 
 OnlineBodyEstimator::OnlineBodyEstimator(
     std::unique_ptr<BodyAttitudeEstimator> estimator,
+    RelationLookup lookup,
     double calibration_duration,
     double still_threshold
-): estimator_(std::move(estimator)),
+): estimator_(std::move(estimator)), lookup_(std::move(lookup)),
    collector_(calibration_duration, still_threshold, STILL_SMOOTH_SAMPLES, estimator_->params().grid_period),
    window_(estimator_->params().resample_window)
 { }
@@ -485,22 +489,7 @@ OnlineBodyEstimator::OnlineBodyEstimator(
 void OnlineBodyEstimator::reset() {
     estimator_->reset();
     collector_.clear();
-}
-
-void OnlineBodyEstimator::add_joint_state(int64_t t, const JointState& state) {
-    const std::size_t n = state.name.size();
-    if (state.name != joint_names_) {
-        joint_names_ = state.name;
-        still_joints_.assign(n, false);
-        std::transform(state.name.begin(), state.name.end(), still_joints_.begin(), is_still_joint);
-        joints_.clear();
-    }
-    Eigen::VectorXd row = Eigen::VectorXd::Zero(2 * n);
-    for (std::size_t i = 0; i < n; ++i) {
-        row(i) = state.position[i];
-        row(n + i) = i < state.velocity.size() ? state.velocity[i] : 0.0;
-    }
-    joints_.append(t, row);
+    last_sample_.reset();
 }
 
 void OnlineBodyEstimator::add_imu(Body body, int64_t t, const Eigen::Vector3d& gyro, const Eigen::Vector3d& acc) {
@@ -531,29 +520,26 @@ void OnlineBodyEstimator::queue_grid(int64_t t) {
 
 OnlineBodyEstimator::Stamp OnlineBodyEstimator::classify(int64_t t, ProcessReport& report) const {
     const bool camera = estimator_->params().use_camera_imu;
-    if (joints_.covers(t, window_) && pelvis_.covers(t, window_) && torso_.covers(t, window_) &&
-        (!camera || camera_.covers(t, window_))) {
+    if (pelvis_.covers(t, window_) && torso_.covers(t, window_) && (!camera || camera_.covers(t, window_))) {
         return Stamp::Ready;
     }
     int64_t oldest = std::numeric_limits<int64_t>::min();
-    for (const SampleBuffer* buffer : {&joints_, &pelvis_, &torso_, &camera_}) {
+    for (const SampleBuffer* buffer : {&pelvis_, &torso_, &camera_}) {
         if (!buffer->empty()) oldest = std::max(oldest, buffer->oldest());
     }
     if (t <= oldest) {
         return Stamp::Stale;
     }
-    if (camera && !camera_.empty() && !joints_.empty() && camera_.latest() > joints_.latest() + CAMERA_AHEAD_NS) {
+    if (camera && !camera_.empty() && !torso_.empty() && camera_.latest() > torso_.latest() + CAMERA_AHEAD_NS) {
         report.camera_ahead = true;
     }
     return Stamp::Wait;
 }
 
-GridSample OnlineBodyEstimator::resample(int64_t t, double& joint_speed) const {
-    // (1) IMUs boxcar-averaged, joints interpolated at the grid stamp.
+GridSample OnlineBodyEstimator::resample(int64_t t, const Relations& rel) const {
+    // IMUs are boxcar-averaged at the grid stamp.
     const Eigen::VectorXd pelvis = pelvis_.boxcar(t, window_);
     const Eigen::VectorXd torso = torso_.boxcar(t, window_);
-    const Eigen::VectorXd joints = joints_.interp(t);
-    const std::size_t n = joint_names_.size();
     GridSample sample;
     sample.t = t;
     sample.gyro_p = pelvis.head<3>();
@@ -565,35 +551,34 @@ GridSample OnlineBodyEstimator::resample(int64_t t, double& joint_speed) const {
         sample.gyro_s = camera.head<3>();
         sample.acc_s = camera.tail<3>();
     }
-    sample.joints.name = joint_names_;
-    sample.joints.position.assign(joints.data(), joints.data() + n);
-
-    // (2) Leg and waist speed for the still detection.
-    joint_speed = 0.0;
-    for (std::size_t i = 0; i < n; ++i) {
-        joint_speed += still_joints_[i] ? std::abs(joints(n + i)) : 0.0;
-    }
+    sample.rel = rel;
     return sample;
 }
 
 ProcessReport OnlineBodyEstimator::process() {
     ProcessReport report;
     while (!pending_.empty()) {
-        const Stamp stamp = classify(pending_.front(), report);
-        if (stamp == Stamp::Wait) {
+        // (1) IMU coverage and relations at the oldest grid stamp.
+        const int64_t t = pending_.front();
+        const Stamp stamp = classify(t, report);
+        Relations rel;
+        const Lookup found = stamp == Stamp::Ready ? lookup_(t, rel) : Lookup::Missing;
+        if (stamp == Stamp::Wait || found == Lookup::Wait) {
             break;
         }
-        const int64_t t = pending_.front();
         pending_.pop_front();
-        if (stamp == Stamp::Stale) {
+        if (found == Lookup::Missing) {
             ++report.dropped;
             continue;
         }
-        double joint_speed = 0.0;
-        const GridSample sample = resample(t, joint_speed);
+
+        // (2) Still-period collection on the relation speed, then the filter.
+        const GridSample sample = resample(t, rel);
+        const double speed = last_sample_ ? relation_speed(last_sample_->rel, rel, (t - last_sample_->t) * 1e-9) : 0.0;
+        last_sample_ = sample;
         if (estimator_->initialized()) {
             report.outputs.push_back({sample.t, estimator_->step(sample)});
-        } else if (collector_.add(sample, joint_speed)) {
+        } else if (collector_.add(sample, speed)) {
             estimator_->initialize(collector_.samples());
             report.calibrated = true;
         }

@@ -1,5 +1,6 @@
 #include "core/body_ekf/body_ekf.h"
 
+#include <g1_pilot/g1_pilot.h>
 #include <gtest/gtest.h>
 #include <cmath>
 #include <limits>
@@ -14,17 +15,19 @@ const Eigen::Vector3d EZ = Eigen::Vector3d::UnitZ();
 const std::vector<std::string> BODY_JOINTS = {
     "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint",
     "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
-    "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint", "left_elbow_joint",
+    "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint", "left_elbow_joint", "right_knee_joint",
 };
 
+std::shared_ptr<Humanoid> load_humanoid(const std::string& urdf, const std::string& asset_root = G1_ASSET_ROOT) {
+    RobotConfig cfg;
+    cfg.asset_root = asset_root;
+    cfg.asset_file = std::string(G1_ASSET_ROOT) + urdf;
+    cfg.config_file = G1_CONFIG_FILE;
+    return std::make_shared<Humanoid>(&cfg);
+}
+
 std::shared_ptr<Humanoid> humanoid() {
-    static std::shared_ptr<Humanoid> handle = [] {
-        RobotConfig cfg;
-        cfg.asset_root = G1_ASSET_ROOT;
-        cfg.asset_file = std::string(G1_ASSET_ROOT) + "g1_29dof_with_hand_rev_1_0.urdf";
-        cfg.config_file = G1_CONFIG_FILE;
-        return std::make_shared<Humanoid>(&cfg);
-    }();
+    static std::shared_ptr<Humanoid> handle = load_humanoid("g1_29dof_with_hand_rev_1_0.urdf");
     return handle;
 }
 
@@ -43,6 +46,16 @@ JointState random_joints(std::mt19937& rng, double range) {
         v = u(rng);
     }
     return joint_state(q);
+}
+
+Relations fk_relations(Humanoid& model, const JointState& joints) {
+    return make_relations(model.frame_transform(joints, "pelvis", "torso_link"),
+                          model.frame_transform(joints, "left_ankle_roll_link", "pelvis"),
+                          model.frame_transform(joints, "right_ankle_roll_link", "pelvis"));
+}
+
+Relations fk_relations(const JointState& joints) {
+    return fk_relations(*humanoid(), joints);
 }
 
 double angle_deg(const Eigen::Matrix3d& A, const Eigen::Matrix3d& B) {
@@ -164,12 +177,12 @@ TEST(BodyEKF, BodyConfigsParse) {
 }
 
 TEST(BodyEKF, HumanoidFrameTransformMatchesKnownPoses) {
-    Eigen::Matrix4d T = humanoid()->frame_transform(joint_state(std::vector<double>(10, 0.0)), "pelvis",
+    Eigen::Matrix4d T = humanoid()->frame_transform(joint_state(std::vector<double>(11, 0.0)), "pelvis",
                                                     "left_ankle_roll_link");
     EXPECT_TRUE((T.topLeftCorner<3, 3>().isIdentity(1e-12)));
     EXPECT_TRUE((T.topRightCorner<3, 1>().isApprox(Eigen::Vector3d(0.0, 0.118506, -0.756864), 1e-5)));
     const double yaw = 0.4, roll = -0.2, pitch = 0.3;
-    T = humanoid()->frame_transform(joint_state({0, 0, 0, 0, 0, 0, yaw, roll, pitch, 0}), "pelvis", "torso_link");
+    T = humanoid()->frame_transform(joint_state({0, 0, 0, 0, 0, 0, yaw, roll, pitch, 0, 0}), "pelvis", "torso_link");
     const Eigen::Matrix3d Rz = rpy_matrix(0.0, 0.0, yaw);
     EXPECT_TRUE((T.topLeftCorner<3, 3>().isApprox(Rz * rpy_matrix(roll, 0.0, 0.0) * rpy_matrix(0.0, pitch, 0.0),
                                                   1e-12)));
@@ -177,12 +190,31 @@ TEST(BodyEKF, HumanoidFrameTransformMatchesKnownPoses) {
     EXPECT_THROW(humanoid()->frame_transform(JointState(), "pelvis", "no_such_link"), std::invalid_argument);
 }
 
-TEST(BodyEKF, RelationsComposeToFootTorso) {
-    BodyAttitudeEstimator estimator(humanoid(), BodyConfig(), Eigen::Matrix3d::Identity());
+TEST(BodyEKF, TfRelationsMatchModelKinematics) {
+    // robot_state_publisher runs the _ros URDF: waist chain rooted at torso_link, meshes under package://g1_description.
+    const auto ros = load_humanoid("g1_29dof_with_hand_rev_1_0_ros.urdf", std::string(G1_ASSET_ROOT) + "../../../");
     std::mt19937 rng(3);
     for (int k = 0; k < 5; ++k) {
-        const Relations rel = estimator.relations(random_joints(rng, 0.3));
-        EXPECT_TRUE((rel.T_foot_torso.topLeftCorner<3, 3>().isApprox(rel.L * rel.W, 1e-12)));
+        const JointState joints = random_joints(rng, 0.3);
+        const Relations model = fk_relations(joints);
+        const Relations tf = fk_relations(*ros, joints);
+        EXPECT_TRUE((model.T_foot_torso.topLeftCorner<3, 3>().isApprox(model.L * model.W, 1e-12)));
+        EXPECT_TRUE(tf.W.isApprox(model.W, 1e-9));
+        EXPECT_TRUE(tf.L.isApprox(model.L, 1e-9));
+        EXPECT_TRUE(tf.L_other.isApprox(model.L_other, 1e-9));
+        EXPECT_TRUE(tf.T_foot_torso.isApprox(model.T_foot_torso, 1e-9));
+    }
+}
+
+TEST(BodyEKF, RelationSpeedMatchesLegAndWaistJointSpeed) {
+    const std::vector<double> q0(BODY_JOINTS.size(), 0.1);
+    const Relations still = fk_relations(joint_state(q0));
+    EXPECT_DOUBLE_EQ(relation_speed(still, still, 5e-3), 0.0);
+    for (std::size_t i = 0; i < BODY_JOINTS.size(); ++i) {
+        std::vector<double> q1 = q0;
+        q1[i] += 0.4 * 5e-3;
+        const double expected = BODY_JOINTS[i] == "left_elbow_joint" ? 0.0 : 0.4;
+        EXPECT_NEAR(relation_speed(still, fk_relations(joint_state(q1)), 5e-3), expected, 1e-6) << BODY_JOINTS[i];
     }
 }
 
@@ -231,21 +263,41 @@ struct StillRun {
     std::vector<GridOutput> outputs;
     bool calibrated = false;
     int calibrations = 0;
+    int dropped = 0;
     Relations rel;
 };
 
-StillRun run_still_robot(bool use_camera_imu, int reset_ms = -1) {
-    // (1) Synthetic still robot: level foot, waist pitched forward, camera IMU equal to the torso IMU.
+constexpr int64_t TF_START_NS = 100000000;
+constexpr int64_t TF_LAG_NS = 2000000;
+
+StillRun run_still_robot(bool use_camera_imu, int reset_ms = -1, int move_until_ms = 0) {
+    // (1) Synthetic robot: level foot, waist pitched forward and swinging until move_until_ms, camera IMU = torso IMU.
     EKFParams params;
     params.use_camera_imu = use_camera_imu;
-    auto estimator = std::make_unique<BodyAttitudeEstimator>(humanoid(), BodyConfig(), Eigen::Matrix3d::Identity(),
-                                                             params);
-    const JointState joints = joint_state({0, 0, 0, 0, 0, 0, 0, 0, 0.3, 0});
+    const std::vector<double> q_still = {0, 0, 0, 0, 0, 0, 0, 0, 0.3, 0, 0};
     StillRun run;
-    run.rel = estimator->relations(joints);
+    run.rel = fk_relations(joint_state(q_still));
     const Eigen::Matrix3d R_p = run.rel.L;
     const Eigen::Matrix3d R_t = run.rel.L * run.rel.W;
-    OnlineBodyEstimator online(std::move(estimator), 0.5);
+
+    // (2) Encoder TF from TF_START_NS on, lagging the IMUs by TF_LAG_NS.
+    int64_t tf_latest = 0;
+    auto lookup = [&](int64_t t, Relations& rel) {
+        if (t < TF_START_NS) {
+            return Lookup::Missing;
+        }
+        if (t > tf_latest) {
+            return Lookup::Wait;
+        }
+        std::vector<double> q = q_still;
+        if (t < static_cast<int64_t>(move_until_ms) * 1000000) {
+            q[8] += 0.3 * std::sin(2.0 * M_PI * static_cast<double>(t) * 1e-9);
+        }
+        rel = q == q_still ? run.rel : fk_relations(joint_state(q));
+        return Lookup::Found;
+    };
+    OnlineBodyEstimator online(std::make_unique<BodyAttitudeEstimator>(Eigen::Matrix3d::Identity(), params), lookup,
+                               0.5);
     std::mt19937 rng(5);
     std::normal_distribution<double> noise(0.0, 1.0);
     auto jitter = [&](double sig) -> Eigen::Vector3d {
@@ -253,10 +305,10 @@ StillRun run_still_robot(bool use_camera_imu, int reset_ms = -1) {
     };
     const Eigen::Vector3d bias(0.003, -0.002, 0.001);
 
-    // (2) 1 kHz joint and body IMU streams and a 200 Hz camera IMU for 3 s.
+    // (3) 1 kHz body IMU streams and a 200 Hz camera IMU for 3 s.
     for (int ms = 0; ms < 3000; ++ms) {
         const int64_t t = static_cast<int64_t>(ms) * 1000000;
-        online.add_joint_state(t, joints);
+        tf_latest = t - TF_LAG_NS;
         online.add_imu(Body::Pelvis, t, bias + jitter(2e-3), R_p.transpose() * EZ * 9.81 + jitter(0.02));
         online.add_imu(Body::Torso, t, bias + jitter(2e-3), R_t.transpose() * EZ * 9.81 + jitter(0.02));
         if (ms % 5 == 0) {
@@ -268,6 +320,7 @@ StillRun run_still_robot(bool use_camera_imu, int reset_ms = -1) {
         const ProcessReport report = online.process();
         run.calibrated = run.calibrated || report.calibrated;
         run.calibrations += report.calibrated ? 1 : 0;
+        run.dropped += report.dropped;
         run.outputs.insert(run.outputs.end(), report.outputs.begin(), report.outputs.end());
     }
     return run;
@@ -281,11 +334,23 @@ TEST(BodyEKF, OnlineEstimatorTracksStaticRobot) {
         EXPECT_LT(angle_deg(run.outputs.back().T_foot_torso.topLeftCorner<3, 3>(), run.rel.L * run.rel.W), 0.5);
         EXPECT_TRUE((run.outputs.back().T_foot_torso.topRightCorner<3, 1>().isApprox(
             run.rel.T_foot_torso.topRightCorner<3, 1>(), 1e-12)));
+        // Stamps before the first TF are dropped; calibration ends 0.5 s after it and output keeps up with the TF.
+        EXPECT_GT(run.dropped, 0);
+        EXPECT_LT(run.outputs.front().t, TF_START_NS + 700000000);
+        EXPECT_GT(run.outputs.back().t, 2990000000 - TF_LAG_NS - 5000000);
         // The torso-IMU grid steps every 5 ms with and without the camera IMU.
         for (std::size_t k = 1; k < run.outputs.size(); ++k) {
             EXPECT_EQ(run.outputs[k].t - run.outputs[k - 1].t, 5000000);
         }
     }
+}
+
+TEST(BodyEKF, OnlineEstimatorWaitsForStillEncoders) {
+    const StillRun run = run_still_robot(false, -1, 1500);
+    ASSERT_EQ(run.calibrations, 1);
+    EXPECT_GE(run.outputs.front().t, 2000000000);
+    EXPECT_LT(run.outputs.front().t, 2300000000);
+    EXPECT_LT(angle_deg(run.outputs.back().T_foot_torso.topLeftCorner<3, 3>(), run.rel.L * run.rel.W), 0.5);
 }
 
 TEST(BodyEKF, OnlineEstimatorRecalibratesAfterReset) {
