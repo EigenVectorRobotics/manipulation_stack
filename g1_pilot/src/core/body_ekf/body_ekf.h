@@ -153,6 +153,7 @@ public:
     // Calibrates on `still`; the first params.init_samples of `init` (default `still`) set the initial tilt.
     void initialize(const std::vector<GridSample>& still, const std::vector<GridSample>* init = nullptr);
     bool initialized() const { return ekf_.has_value(); }
+    void reset();
 
     // Propagates to sample.t with the previous gyros, fuses this sample and returns foot <- torso.
     Eigen::Matrix4d step(const GridSample& sample);
@@ -212,6 +213,7 @@ public:
     // `joint_speed` is the sum of |velocity| over the leg and waist joints; true once enough data is held.
     bool add(const GridSample& sample, double joint_speed);
     const std::vector<GridSample>& samples() const { return rows_; }
+    void clear();
 
 private:
     std::size_t required_;
@@ -249,6 +251,9 @@ public:
 
     ProcessReport process();
     const BodyAttitudeEstimator& estimator() const { return *estimator_; }
+
+    // Recalibrates on the next still period without dropping the sensor streams; no output until then.
+    void reset();
 
 private:
     enum class Stamp { Ready, Wait, Stale };

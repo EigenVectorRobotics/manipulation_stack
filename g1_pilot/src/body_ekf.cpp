@@ -6,6 +6,7 @@
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "sensor_msgs/msg/imu.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
+#include "std_srvs/srv/trigger.hpp"
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
@@ -72,6 +73,19 @@ public:
         joint_sub_ = encoder_subscription_(joint_states_topic_);
         pelvis_imu_sub_ = imu_subscription_(pelvis_imu_topic_, Body::Pelvis);
         torso_imu_sub_ = imu_subscription_(torso_imu_topic_, Body::Torso);
+        reset_srv_ = this->create_service<std_srvs::srv::Trigger>("~/reset",
+            [this](const std_srvs::srv::Trigger::Request::SharedPtr,
+                   std_srvs::srv::Trigger::Response::SharedPtr response) {
+                if (!estimator_) {
+                    response->success = false;
+                    response->message = "estimator not started";
+                    return;
+                }
+                estimator_->reset();
+                response->success = true;
+                response->message = "collecting still period";
+                RCLCPP_INFO(this->get_logger(), "body_ekf: reset; collecting still period");
+            });
 
         // (4) Camera IMU after its TF resolves, or the torso gyro alone right away.
         const std::string robot_name = this->declare_parameter<std::string>("robot_name", "unknown");
@@ -116,6 +130,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr pelvis_imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr torso_imu_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr camera_imu_sub_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_srv_;
     std::string pelvis_imu_topic_;
     std::string torso_imu_topic_;
     std::string joint_states_topic_;
