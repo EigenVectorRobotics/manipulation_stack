@@ -274,14 +274,15 @@ VisualServoPlanner::constructTrajectory(
 ){
     // (1) Parameterize the paths and build the trajectory
     if (approach_leg_.empty()) return {};
-    JointTrajectory traj = timeParameterize(approach_leg_, time_step, max_joint_vel/2, max_joint_acc/4);
+    const JointTrajectory approach = timeParameterize(approach_leg_, time_step, max_joint_vel/2, max_joint_acc/4);
+    JointTrajectory traj = approach;
     if (!waypoints_.empty()) {
         traj = concatenateTrajectories(
-            timeParameterize(waypoints_, time_step, max_joint_vel, max_joint_acc), traj, PREGRASP_DELAY);
+            timeParameterize(waypoints_, time_step, max_joint_vel, max_joint_acc), approach, PREGRASP_DELAY);
     }
 
     // The target locks when the final leg starts
-    traj.lock_time = traj.time_step * (traj.position.front().size() - approach_leg_.size());
+    traj.lock_time = traj.time_step * (traj.position.front().size() - approach.position.front().size());
     
     if (!retreat){
         return traj;
