@@ -19,7 +19,6 @@
   <depend>humanoid_manipulation_interfaces</depend>
 
   <exec_depend>g1_description</exec_depend>
-  <exec_depend>g1_pilot</exec_depend>
   <exec_depend>unitree_interface</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
