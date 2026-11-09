@@ -81,7 +81,7 @@ private:
     Eigen::MatrixXd replan_target_();
     void start_stepping_(const JointState & state, const Eigen::MatrixXd & target);
     Eigen::Vector3d safety_offset_();
-    Eigen::Vector3d gripper_estimate_error_(bool left);
+    Eigen::Vector3d gripper_estimate_error_(bool left, const Eigen::Matrix3d & target_rotation);
     void step_final_leg_(const std::shared_ptr<GoalHandle> & goal);
     Eigen::Matrix4d pelvis_from_anchor_(const JointState & state);
     Eigen::MatrixXd to_pelvis_frame_(const PoseStamped & pose);
