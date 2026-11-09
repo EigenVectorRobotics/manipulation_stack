@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
@@ -55,6 +55,10 @@ def generate_launch_description():
         DeclareLaunchArgument('position_control_topic',
                               default_value='position_control'),
         DeclareLaunchArgument('traj_topic', default_value='traj'),
+
+        # body_ekf publishes foot_world, the frame the arm targets are filtered in
+        DeclareLaunchArgument('body_ekf', default_value='true',
+                              description='Start body_ekf (false: one already runs)'),
     ]
 
     g1_pilot_share = FindPackageShare('g1_pilot')
@@ -86,6 +90,15 @@ def generate_launch_description():
                for axis in 'xyz'},
         }.items(),
     )
+
+    # Scoped, so its robot argument stays out of the other includes
+    body_ekf_launch = GroupAction(condition=IfCondition(LaunchConfiguration('body_ekf')), actions=[
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([g1_pilot_share, 'launch', 'body_ekf.launch.py'])
+            ),
+        ),
+    ])
 
     pose_filter_node = Node(
         package='humanoid_arm_skills',
@@ -126,6 +139,7 @@ def generate_launch_description():
 
     return LaunchDescription(args + [
         display_launch,
+        body_ekf_launch,
         move_to_pose_launch,
         pose_filter_node,
         servo_arm_node,

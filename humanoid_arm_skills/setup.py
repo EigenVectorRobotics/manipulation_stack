@@ -36,6 +36,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'),
             glob(os.path.join('launch', '*launch.[pxy][yma]*'))),
+        (os.path.join('share', package_name, 'meshes'), glob(os.path.join('meshes', '*.STL'))),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -48,6 +49,7 @@ setup(
             'humanoid_arm_vs = humanoid_arm_skills.humanoid_arm_visual_servoing:main',
             'noisy_pose_publisher = humanoid_arm_skills.noisy_pose_publisher:main',
             'pose_filtering = humanoid_arm_skills.pose_filtering:main',
+            'gripper_pose_estimator = humanoid_arm_skills.gripper_pose_estimator:main',
         ],
     },
 )

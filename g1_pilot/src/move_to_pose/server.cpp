@@ -74,6 +74,9 @@ void MoveToPoseServer::declare_parameters_()
     declare_parameter<std::string>("final_leg_anchor_frame", "left_ankle_roll_link");
     declare_parameter<int>("final_leg_steps", 10);
     declare_parameter<double>("final_leg_settle_time", 0.5);
+    declare_parameter<bool>("use_gripper_estimate", true);
+    declare_parameter<double>("gripper_estimate_max_age", 0.5);
+    declare_parameter<double>("gripper_estimate_max_error", 0.03);
     frame_ = get_parameter("planning_frame").as_string();
     control_period_ = get_parameter("control_period").as_double();
 }
