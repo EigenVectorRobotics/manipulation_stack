@@ -199,8 +199,13 @@ void Humanoid::apply_joint_dynamics() {
 }
 
 void Humanoid::add_end_effector_frames() {
-    auto add = [&](const std::string& frame_name, const EEFrame& ee) {
+    auto add = [&](const std::string& frame_name, EEFrame& ee) {
         auto parent_id = impl_->model_full.getJointId(ee.parent_joint);
+        // The joint's child link is the body frame that hangs directly off the joint frame
+        const auto joint_frame = impl_->model_full.getFrameId(ee.parent_joint, pinocchio::JOINT);
+        for (const auto& frame : impl_->model_full.frames) {
+            if (frame.type == pinocchio::BODY && frame.parentFrame == joint_frame) ee.parent_link = frame.name;
+        }
         pinocchio::SE3 placement(Eigen::Matrix3d::Identity(), ee.offset);
         impl_->model_full.addFrame(pinocchio::Frame(
             frame_name, parent_id, placement, pinocchio::OP_FRAME
@@ -280,13 +285,6 @@ bool Humanoid::check_collision(const Eigen::VectorXd& q){
 
 void Humanoid::update(JointState current_state){
     return impl_->controller->update(current_state);
-}
-
-Eigen::MatrixXd Humanoid::get_current_left_ee_pose(){
-    return impl_->controller->get_current_left_ee_pose();
-}
-Eigen::MatrixXd Humanoid::get_current_right_ee_pose(){
-    return impl_->controller->get_current_right_ee_pose();
 }
 
 Eigen::VectorXd Humanoid::get_current_left_ee_vel(){
@@ -479,5 +477,7 @@ Eigen::Matrix4d Humanoid::frame_transform(
 }
 
 void Humanoid::setLeftArm(bool left_arm) { impl_->motion_planner->setLeftArm(left_arm); }
+
+std::string Humanoid::plan_failure() { return impl_->motion_planner->failure(); }
 
 } // HumanoidPilot namespace

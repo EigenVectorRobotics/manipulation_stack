@@ -3,10 +3,25 @@
 
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <limits>
 #include <stdexcept>
 
 namespace g1_pilot {
+
+namespace {
+
+bool valid_pose(const geometry_msgs::msg::Pose & pose)
+{
+    const auto & p = pose.position;
+    const auto & q = pose.orientation;
+    const double norm = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) && std::abs(norm - 1.0) < 0.1;
+}
+
+} // namespace
 
 void MoveToPoseServer::worker_loop_()
 {
@@ -19,24 +34,34 @@ void MoveToPoseServer::worker_loop_()
             goal = pending_;
             pending_ = nullptr;
         }
-        run_(goal);
+        // An exception must not take down the node while the arm is moving
+        try {
+            run_(goal);
+        } catch (const std::exception & e) {
+            fail_(goal, std::string("Internal error: ") + e.what());
+        } catch (...) {
+            fail_(goal, "Internal error");
+        }
     }
 }
 
 void MoveToPoseServer::run_(const std::shared_ptr<GoalHandle> & goal)
 {
-    // (1) Snapshot feedback and transform the requested pose into the core frame.
+    // (1) Take a start state at rest and transform the requested pose into the core frame.
     last_replan_ = {};
-    JointState start;
-    {
-        std::lock_guard<std::mutex> lock(ctrl_mutex_);
-        start = state_;
-    }
-    if (start.name.empty()) {
-        finish_(goal, false, 0.0, "No joint feedback received yet");
+    plan_failures_ = 0;
+    off_track_since_ = {};
+    const auto request = goal->get_goal();
+    if (!valid_pose(request->target_pose.pose)) {
+        finish_(goal, false, 0.0, "Invalid target pose: non-finite position or non-unit quaternion");
         return;
     }
-    const auto request = goal->get_goal();
+    JointState start;
+    const auto start_failure = take_start_(goal, start);
+    if (!start_failure.empty()) {
+        finish_(goal, false, 0.0, start_failure);
+        return;
+    }
     const auto target = to_pelvis_frame_(request->target_pose);
     if (target.size() == 0) {
         finish_(goal, false, 0.0, "Target pose transform failed");
@@ -48,6 +73,7 @@ void MoveToPoseServer::run_(const std::shared_ptr<GoalHandle> & goal)
     Plan plan;
     try {
         plan = plan_(start, target, request->left_arm, false);
+        check_reach_(plan, target);
     } catch (const std::exception & e) {
         RCLCPP_ERROR(get_logger(), "Planning failed: %s", e.what());
         finish_(goal, false, 0.0, std::string("Planning failed: ") + e.what());
@@ -78,6 +104,39 @@ void MoveToPoseServer::run_(const std::shared_ptr<GoalHandle> & goal)
     monitor_(goal);
 }
 
+std::string MoveToPoseServer::take_start_(const std::shared_ptr<GoalHandle> & goal, JointState & start)
+{
+    // (1) Give up when the goal ends or feedback is missing or stale.
+    const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(get_parameter("feedback_period").as_double()));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (rclcpp::ok() && !stopping_.load()) {
+        {
+            std::scoped_lock lock(goal_mutex_, ctrl_mutex_);
+            if (active_ != goal) return "Preempted by a newer goal";
+            if (goal->is_canceling()) return "Cancelled while planning";
+            if (state_.name.empty()) return "No joint feedback received yet";
+            const double age = feedback_age_locked_();
+            if (age > get_parameter("feedback_timeout").as_double()) {
+                char message[96];
+                std::snprintf(message, sizeof(message), "Joint feedback is stale (%.2f s old)", age);
+                return message;
+            }
+
+            // (2) Motion left by an earlier goal is braked first, so the plan starts at rest where the arm is.
+            if (mode_ == ControlMode::Tracking) brake_locked_();
+            if (mode_ != ControlMode::Braking) {
+                start = mode_ == ControlMode::Holding ? held_state_locked_() : state_;
+                return "";
+            }
+        }
+        if (std::chrono::steady_clock::now() > deadline) return "Timed out braking the previous motion";
+        std::unique_lock<std::mutex> lock(goal_mutex_);
+        cv_.wait_for(lock, period);
+    }
+    return "Node shutting down";
+}
+
 MoveToPoseServer::Plan MoveToPoseServer::plan_(
     const JointState & start, const Eigen::MatrixXd & target, bool left, bool replan)
 {
@@ -94,13 +153,24 @@ MoveToPoseServer::Plan MoveToPoseServer::plan_(
 MoveToPoseServer::Plan MoveToPoseServer::to_plan_(const HumanoidPilot::JointTrajectory & planned, bool left)
 {
     const auto configs = toJointConfigs(planned);
-    if (configs.empty()) throw std::runtime_error("empty trajectory");
+    if (configs.empty()) {
+        const auto reason = planner_->plan_failure();
+        throw std::runtime_error(reason.empty() ? "empty trajectory" : reason);
+    }
     Plan result;
     result.path.reserve(configs.size());
     for (const auto & q : configs) result.path.push_back(planner_->forward_kinematics(q, left));
     result.trajectory = convertToTrajectory(planned, frame_, get_clock()->now());
     result.lock_time = planned.lock_time;
     if (result.trajectory.points.empty()) throw std::runtime_error("no waypoints");
+    for (const auto & point : result.trajectory.points) {
+        for (const double v : point.positions) {
+            if (!std::isfinite(v)) throw std::runtime_error("non-finite joint position in the plan");
+        }
+        for (const double v : point.velocities) {
+            if (!std::isfinite(v)) throw std::runtime_error("non-finite joint velocity in the plan");
+        }
+    }
     return result;
 }
 
@@ -114,12 +184,13 @@ void MoveToPoseServer::try_replan_(const std::shared_ptr<GoalHandle> & goal)
     Plan plan;
     try {
         plan = plan_(start, target, goal->get_goal()->left_arm, true);
+        check_reach_(plan, target);
     } catch (const std::exception & e) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-            "Replan failed: %s; holding position", e.what());
+        record_plan_failure_(goal, std::string("Replan failed: ") + e.what());
         return;
     }
     if (install_(goal, plan.trajectory, target, plan.lock_time) != GoalStatus::Active) return;
+    plan_failures_ = 0;
     publish_path_(plan.path);
     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
         "Replanned to [%.3f %.3f %.3f], %zu waypoints",
@@ -131,6 +202,10 @@ Eigen::MatrixXd MoveToPoseServer::replan_target_()
     // (1) Read the latest target when the replanning interval allows it.
     PoseStamped update;
     if (!read_target_(update)) return {};
+    if (!valid_pose(update.pose)) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Ignoring an invalid target update");
+        return {};
+    }
     if (last_replan_.time_since_epoch().count() != 0) {
         const double since = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - last_replan_).count();
@@ -219,13 +294,16 @@ void MoveToPoseServer::step_final_leg_(const std::shared_ptr<GoalHandle> & goal)
     Plan plan;
     try {
         planner_->setLeftArm(goal->get_goal()->left_arm);
-        plan = to_plan_(planner_->planFinalLegStep(
-            start, target, step, leg_steps_, last, get_parameter("plan_time_step").as_double(),
-            get_parameter("max_joint_vel").as_double(), get_parameter("max_joint_acc").as_double()),
+        const double dt = get_parameter("plan_time_step").as_double();
+        const double velocity = get_parameter("max_joint_vel").as_double();
+        const double acceleration = get_parameter("max_joint_acc").as_double();
+        const int steps = static_cast<int>(get_parameter("final_leg_steps").as_int());
+        plan = to_plan_(
+            planner_->planFinalLegStep(start, target, step, leg_steps_, last, dt, velocity, acceleration),
             goal->get_goal()->left_arm);
+        if (last) check_reach_(plan, target);
     } catch (const std::exception & e) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-            "Final-leg step %zu failed: %s; holding position", leg_step_, e.what());
+        record_plan_failure_(goal, "Final-leg step " + std::to_string(leg_step_) + " failed: " + e.what());
         return;
     }
 
@@ -235,6 +313,7 @@ void MoveToPoseServer::step_final_leg_(const std::shared_ptr<GoalHandle> & goal)
         hold_between_steps_ = !last;
     }
     if (install_(goal, plan.trajectory, target, -1.0) != GoalStatus::Active) return;
+    plan_failures_ = 0;
     publish_path_(plan.path);
     RCLCPP_INFO(get_logger(), "Final-leg step %zu/%zu to [%.3f %.3f %.3f]",
                 leg_step_, n, target(0, 3), target(1, 3), target(2, 3));
@@ -297,6 +376,11 @@ void MoveToPoseServer::monitor_(const std::shared_ptr<GoalHandle> & goal)
                 ? "Cancelled" : "Preempted by a newer goal");
             return;
         }
+        const auto failure = execution_failure_(goal->get_goal()->left_arm);
+        if (!failure.empty()) {
+            fail_(goal, failure);
+            return;
+        }
         if (stepping_) step_final_leg_(goal);
         else try_replan_(goal);
         if (goal_status_(goal) != GoalStatus::Active) continue;
@@ -314,11 +398,17 @@ bool MoveToPoseServer::report_progress_(const std::shared_ptr<GoalHandle> & goal
     // (1) Snapshot progress under the control mutex.
     auto feedback = std::make_shared<MoveToPoseFeedback>();
     ControlMode mode;
+    double max_error = 0.0;
+    JointState state;
+    Eigen::MatrixXd target;
     {
         std::lock_guard<std::mutex> lock(ctrl_mutex_);
         mode = mode_;
-        if (mode == ControlMode::Holding) error_ = joint_error_locked_(hold_command_.position);
+        if (mode == ControlMode::Holding) update_errors_locked_(hold_command_.position);
         feedback->current_error = error_;
+        max_error = max_error_;
+        state = state_;
+        target = planned_for_;
         feedback->tracking = mode == ControlMode::Tracking || mode == ControlMode::Braking;
         if (feedback->tracking) {
             feedback->total_waypoints = static_cast<uint32_t>(traj_points_.size());
@@ -333,11 +423,104 @@ bool MoveToPoseServer::report_progress_(const std::shared_ptr<GoalHandle> & goal
     }
     if (mode == ControlMode::Complete) {
         RCLCPP_INFO(get_logger(), "Trajectory complete (error=%f)", feedback->current_error);
-        finish_(goal, true, feedback->current_error, "Target reached");
+        if (max_error > get_parameter("max_tracking_error").as_double() &&
+            !near_target_(state, target, goal->get_goal()->left_arm)) {
+            char message[96];
+            std::snprintf(message, sizeof(message),
+                "Arm stopped with a joint %.3f rad from its commanded position", max_error);
+            finish_(goal, false, feedback->current_error, message);
+        } else {
+            finish_(goal, true, feedback->current_error, "Target reached");
+        }
         return true;
     }
     goal->publish_feedback(feedback);
     return false;
+}
+
+std::string MoveToPoseServer::execution_failure_(bool left)
+{
+    // (1) Old feedback ends the goal at once.
+    char message[96];
+    JointState state;
+    Eigen::MatrixXd target;
+    double max_error = 0.0;
+    bool tracking = false;
+    {
+        std::lock_guard<std::mutex> lock(ctrl_mutex_);
+        const double age = feedback_age_locked_();
+        if (age > get_parameter("feedback_timeout").as_double()) {
+            std::snprintf(message, sizeof(message), "Joint feedback is %.2f s old", age);
+            return message;
+        }
+        tracking = mode_ == ControlMode::Tracking;
+        max_error = max_error_;
+        state = state_;
+        target = planned_for_;
+    }
+
+    // (2) A joint error that stays high while tracking ends it too, except near the target, where pressing looks the same.
+    if (!tracking || max_error <= get_parameter("max_tracking_error").as_double()) {
+        off_track_since_ = {};
+        return "";
+    }
+    if (near_target_(state, target, left)) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+            "A joint is %.3f rad off near the target; continuing", max_error);
+        off_track_since_ = {};
+        return "";
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (off_track_since_.time_since_epoch().count() == 0) off_track_since_ = now;
+    if (std::chrono::duration<double>(now - off_track_since_).count()
+            < get_parameter("tracking_error_timeout").as_double()) return "";
+    std::snprintf(message, sizeof(message), "Arm is not following the trajectory: a joint is %.3f rad off", max_error);
+    return message;
+}
+
+bool MoveToPoseServer::near_target_(const JointState & state, const Eigen::MatrixXd & target, bool left)
+{
+    // Measured gripper position, from the planner's model, against the installed target
+    if (target.size() == 0) return false;
+    const auto names = planner_->get_joint_names();
+    Eigen::VectorXd q = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(names.size()));
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        const auto it = std::find(state.name.begin(), state.name.end(), names[i]);
+        if (it != state.name.end()) q(static_cast<Eigen::Index>(i)) = state.position[std::distance(state.name.begin(), it)];
+    }
+    const Eigen::MatrixXd tip = planner_->forward_kinematics(q, left);
+    return (tip.block<3, 1>(0, 3) - target.block<3, 1>(0, 3)).norm() <= get_parameter("near_target_distance").as_double();
+}
+
+void MoveToPoseServer::check_reach_(const Plan & plan, const Eigen::MatrixXd & target)
+{
+    // The goal configuration is the path sample nearest the target; any retreat after it only moves away
+    double position = std::numeric_limits<double>::infinity();
+    double angle = 0.0;
+    for (const auto & pose : plan.path) {
+        const double d = (pose.block<3, 1>(0, 3) - target.block<3, 1>(0, 3)).norm();
+        if (d >= position) continue;
+        position = d;
+        const Eigen::Matrix3d dR = pose.block<3, 3>(0, 0).transpose() * target.block<3, 3>(0, 0);
+        angle = std::abs(Eigen::AngleAxisd(dR).angle());
+    }
+    if (position <= get_parameter("goal_position_tolerance").as_double() &&
+        angle <= get_parameter("goal_orientation_tolerance").as_double()) return;
+    char message[128];
+    std::snprintf(message, sizeof(message), "target out of reach: the arm ends %.1f mm and %.1f deg from it",
+                  position * 1e3, angle * 180.0 / M_PI);
+    throw std::runtime_error(message);
+}
+
+void MoveToPoseServer::record_plan_failure_(const std::shared_ptr<GoalHandle> & goal, const std::string & message)
+{
+    // A failed replan or step leaves the arm holding; repeated failures end the goal instead of holding forever
+    const int limit = static_cast<int>(get_parameter("max_plan_failures").as_int());
+    if (++plan_failures_ >= limit) {
+        fail_(goal, message + " (" + std::to_string(plan_failures_) + " attempts)");
+        return;
+    }
+    RCLCPP_WARN(get_logger(), "%s; holding position (attempt %d of %d)", message.c_str(), plan_failures_, limit);
 }
 
 Eigen::MatrixXd MoveToPoseServer::to_pelvis_frame_(const PoseStamped & pose)

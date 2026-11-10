@@ -22,8 +22,6 @@ def generate_launch_description():
     ))
     ld.add_action(DeclareLaunchArgument('feedback_topic', default_value='feedback'))
     ld.add_action(DeclareLaunchArgument('position_control_topic', default_value='position_control'))
-    ld.add_action(DeclareLaunchArgument('left_ee_pose_topic', default_value='left_ee_pose'))
-    ld.add_action(DeclareLaunchArgument('right_ee_pose_topic', default_value='right_ee_pose'))
 
     ld.add_action(IncludeLaunchDescription(
         PathJoinSubstitution([description_pkg_path, 'launch', 'display.launch.py']),
@@ -39,8 +37,6 @@ def generate_launch_description():
         parameters=[{
             'feedback_topic': LaunchConfiguration('feedback_topic'),
             'position_control_topic': LaunchConfiguration('position_control_topic'),
-            'left_ee_pose_topic': LaunchConfiguration('left_ee_pose_topic'),
-            'right_ee_pose_topic': LaunchConfiguration('right_ee_pose_topic'),
         }],
     ))
     return ld

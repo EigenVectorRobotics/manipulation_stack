@@ -37,10 +37,6 @@ def generate_launch_description():
         # humanoid_arm_visual_servoing
         DeclareLaunchArgument('keyboard_input_topic',
                               default_value='/keyboard_input'),
-        DeclareLaunchArgument('left_ee_pose_topic',
-                              default_value='/left_ee_pose'),
-        DeclareLaunchArgument('right_ee_pose_topic',
-                              default_value='/right_ee_pose'),
         DeclareLaunchArgument('move_to_pose_action',
                               default_value='/move_to_pose'),
         DeclareLaunchArgument('arm_safety_distance_x', default_value='-0.0'),
@@ -82,8 +78,6 @@ def generate_launch_description():
             'move_to_pose_action': LaunchConfiguration('move_to_pose_action'),
             'feedback_topic': LaunchConfiguration('feedback_topic'),
             'position_control_topic': LaunchConfiguration('position_control_topic'),
-            'left_ee_pose_topic': LaunchConfiguration('left_ee_pose_topic'),
-            'right_ee_pose_topic': LaunchConfiguration('right_ee_pose_topic'),
             'traj_topic': LaunchConfiguration('traj_topic'),
             'planning_frame': LaunchConfiguration('target_frame_arm'),
             **{f'arm_safety_distance_{axis}': LaunchConfiguration(f'arm_safety_distance_{axis}')
@@ -131,8 +125,6 @@ def generate_launch_description():
                  "_filtered/arm_upright'"]),
             'keyboard_input_topic': LaunchConfiguration(
                 'keyboard_input_topic'),
-            'left_ee_pose_topic': LaunchConfiguration('left_ee_pose_topic'),
-            'right_ee_pose_topic': LaunchConfiguration('right_ee_pose_topic'),
             'move_to_pose_action': LaunchConfiguration('move_to_pose_action'),
         }]
     )

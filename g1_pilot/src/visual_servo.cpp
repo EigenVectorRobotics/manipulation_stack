@@ -6,6 +6,7 @@
 #include "helper_funcs.h"
 
 #include <tf2_ros/buffer.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <tuple>
@@ -50,6 +51,8 @@ public:
         /* TF2 */
         tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+        ee_broadcaster_ = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
+        ee_broadcaster_->sendTransform(ee_static_transforms(*arm_handle_, this->get_clock()->now()));
 
         /* Publishers */
         this->declare_parameter<std::string>("position_control_topic", "position_control");
@@ -110,13 +113,12 @@ private:
     // TF2
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+    std::shared_ptr<tf2_ros::StaticTransformBroadcaster> ee_broadcaster_;
 
     // Arm Handle
     std::unique_ptr<Humanoid> arm_handle_;
 
     // Variables for endeffector state
-    Eigen::MatrixXd left_ee_pose_;
-    Eigen::MatrixXd right_ee_pose_;
     Eigen::VectorXd left_ee_vel_ = Eigen::VectorXd::Zero(6);
     Eigen::VectorXd right_ee_vel_ = Eigen::VectorXd::Zero(6);
 
@@ -162,8 +164,6 @@ private:
 
         arm_handle_->update(current_state_);
 
-        left_ee_pose_ = arm_handle_->get_current_left_ee_pose();
-        right_ee_pose_ = arm_handle_->get_current_right_ee_pose();
 
         // Hold every joint at its measured position by default; each active
         // trajectory then overwrites only the joints it actually commands.
@@ -267,8 +267,9 @@ private:
     }
 
     void handle_new_goal_pose_(geometry_msgs::msg::PoseStamped::UniquePtr msg, bool left){
-        // Wait until controller has computed EE poses from feedback
-        if (left_ee_pose_.size() == 0 || right_ee_pose_.size() == 0){
+        // Wait until TF carries both grippers, which needs the arm joint states
+        if (!tf_buffer_->canTransform("pelvis", "left_ee", tf2::TimePointZero) ||
+            !tf_buffer_->canTransform("pelvis", "right_ee", tf2::TimePointZero)){
             RCLCPP_WARN(this->get_logger(), "EE poses not yet initialized, ignoring goal");
             return;
         }

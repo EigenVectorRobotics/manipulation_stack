@@ -412,7 +412,7 @@ Waypoints are selected by **elapsed time against each point's `time_from_start`*
 | Action srv | `trajectory_controller` | `humanoid_manipulation_interfaces/ControlJointTrajectory` |
 | Sub | `feedback` | `sensor_msgs/JointState` |
 | Pub | `position_control` | `sensor_msgs/JointState` |
-| Pub | `left_ee_pose`, `right_ee_pose` | `geometry_msgs/PoseStamped` |
+| Static TF | `left_ee`, `right_ee` | `tf2_msgs/TFMessage` |
 
 `waypoint_error_margin` (default 0.003 rad, RMS over commanded joints) is now reporting-only — it feeds the action feedback/result and no longer gates waypoint advance.
 
@@ -511,9 +511,11 @@ The skill sends one `MoveToPose` goal and streams filtered target poses to its `
 **Pipeline per goal:**
 
 1. Reset the visual tracker (`/track_3d/reset`); forward `target_description` to the VLM via `keyboard_input_topic` so it can ground the target.
-2. Wait for the first filtered target pose and current EE pose, then send a `MoveToPose` action goal.
+2. Wait for the first filtered target pose, then send a `MoveToPose` action goal.
 3. Publish each filtered target to the action's `target_topic`. When drift triggers replanning, the motion server holds the current trajectory waypoint with gravity feedforward until a new plan is ready.
-4. Report target distance and tracking loss at 2 Hz. Finish when the motion succeeds, fails, or the visual-servo goal ends.
+4. Report target distance and tracking loss at 2 Hz. Finish when the motion succeeds, fails, or the visual-servo goal ends; track3d is reset on every exit.
+
+Every stage that waits has its own limit, so no fault waits for `action_timeout`: no seed after `seed_max_requests` requests, no filtered pose within `first_pose_timeout` of tracking, move_to_pose unavailable for `server_wait_timeout`, or gone for `server_lost_timeout` mid-motion. `final_distance` is the closest approach to the goal, since a press ends with a retreat to the pre-grasp.
 
 **Action interface** (`humanoid_manipulation_interfaces/VisualServoingArm`):
 
@@ -528,6 +530,9 @@ The skill sends one `MoveToPose` goal and streams filtered target poses to its `
 | `goal_rate` | 2.0 Hz | Main loop rate. |
 | `action_timeout` | 600 s | Per-goal timeout. |
 | `post_goal_cooldown` | 1.0 s | Cooldown after a successful goal. |
+| `first_pose_timeout` | 10 s | Wait for a filtered target pose once tracking starts. |
+| `server_wait_timeout` | 5 s | Wait for move_to_pose before the first goal. |
+| `server_lost_timeout` | 2 s | Abort when move_to_pose disappears mid-motion. |
 
 The skill uses a `ReentrantCallbackGroup` for callbacks and a motion lock for goal state. `move_to_pose` owns trajectory replanning.
 
@@ -848,7 +853,7 @@ Re-plans every 3 s and publishes IK solutions per waypoint.
 | Out | `position_control` | `sensor_msgs/JointState` | `controller`, `joint_controller`, `visual_servo`, `ik_joint_state_publisher`, `joint_traj_publisher` |
 | Out | `effort_control` | `sensor_msgs/JointState` | `impede_arms`, `grav_ff` |
 | Out | `traj` | `nav_msgs/Path` | planners (visualisation) |
-| Out | `left_ee_pose`, `right_ee_pose` | `geometry_msgs/PoseStamped` | `controller`, `joint_controller` |
+| Out | `/tf_static`: `left_ee`, `right_ee` on the wrist yaw links | `tf2_msgs/TFMessage` | `move_to_pose`, `joint_controller`, `visual_servo` |
 | In/Out (skill) | `track_3d/*` | various | `humanoid_arm_vs`, `pose_filtering` |
 | Out (skill) | `keyboard_input` | `std_msgs/String` | `humanoid_arm_vs` (target → VLM) |
 

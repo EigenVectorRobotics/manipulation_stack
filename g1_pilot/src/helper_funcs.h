@@ -7,6 +7,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <builtin_interfaces/msg/time.hpp>
 #include <rclcpp/clock.hpp>
 #include <rclcpp/duration.hpp>
@@ -214,6 +215,26 @@ inline bool isWithinLimits(const Eigen::MatrixXd& T,
 
     reason += violations;
     return false;
+}
+
+// Static transforms placing the left_ee and right_ee gripper frames on their wrist links.
+inline std::vector<geometry_msgs::msg::TransformStamped> ee_static_transforms(
+    const HumanoidPilot::Humanoid& humanoid, const rclcpp::Time& stamp)
+{
+    std::vector<geometry_msgs::msg::TransformStamped> out;
+    for (const auto& [name, ee] : {std::make_pair(std::string("left_ee"), humanoid.get_left_ee()),
+                                   std::make_pair(std::string("right_ee"), humanoid.get_right_ee())}) {
+        geometry_msgs::msg::TransformStamped t;
+        t.header.stamp = stamp;
+        t.header.frame_id = ee.parent_link;
+        t.child_frame_id = name;
+        t.transform.translation.x = ee.offset.x();
+        t.transform.translation.y = ee.offset.y();
+        t.transform.translation.z = ee.offset.z();
+        t.transform.rotation.w = 1.0;
+        out.push_back(t);
+    }
+    return out;
 }
 
 #endif

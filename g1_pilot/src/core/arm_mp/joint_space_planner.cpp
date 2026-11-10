@@ -521,18 +521,6 @@ bool JointSpacePlanner::motionValid(
     return rrt_->si->checkMotion(sa.get(), sb.get());
 }
 
-bool JointSpacePlanner::poseNear(
-    const Eigen::Matrix4d& a,
-    const Eigen::Matrix4d& b,
-    const double pos_tol,
-    const double rot_tol
-) {
-    if ((a.block<3,1>(0,3) - b.block<3,1>(0,3)).norm() > pos_tol) return false;
-
-    const Eigen::Matrix3d dR = a.block<3,3>(0,0).transpose() * b.block<3,3>(0,0);
-    return Eigen::AngleAxisd(dR).angle() <= rot_tol;
-}
-
 JointState JointSpacePlanner::solveGoalConfig(
     const Eigen::MatrixXd& pose,
     const JointState& start_state,
@@ -563,15 +551,18 @@ bool JointSpacePlanner::runRRTStar(
     const Eigen::VectorXd& goal_q,
     std::vector<Eigen::VectorXd>& path
 ) {
+    failure_.clear();
     rrt_->setQuery(start_q, goal_q);
     relaxWallForStart(start_q);
 
     if (!rrt_->si->isValid(rrt_->start.get())) {
+        failure_ = "start configuration is in collision";
         std::cout << "[runSearch] start state is in collision" << std::endl;
         path.resize(0);
         return false;
     }
     if (!rrt_->si->isValid(rrt_->goal.get())) {
+        failure_ = "pre-grasp configuration is in collision or past the target surface";
         std::cout << "[runSearch] goal state is in collision" << std::endl;
         path.resize(0);
         return false;
@@ -629,6 +620,7 @@ bool JointSpacePlanner::runRRTStar(
     }
 
     if (!solution) {
+        failure_ = "no collision-free path to the pre-grasp";
         std::cout << "[runSearch] no exact solution" << std::endl;
         path.resize(0);
         return false;
@@ -636,6 +628,7 @@ bool JointSpacePlanner::runRRTStar(
 
     auto path_geom = std::dynamic_pointer_cast<og::PathGeometric>(solution);
     if (!path_geom) {
+        failure_ = "planner returned a non-geometric path";
         path.resize(0);
         return false;
     }

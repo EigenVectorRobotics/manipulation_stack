@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <unordered_map>
 #include <utility>
 
@@ -10,12 +11,9 @@ namespace g1_pilot {
 
 void MoveToPoseServer::control_tick_()
 {
-    const auto transform = pelvis_to_planning_frame_();
     check_control_period_();
     std::lock_guard<std::mutex> lock(ctrl_mutex_);
     if (state_.name.empty()) return;
-    controller_model_->update(state_);
-    publish_poses_locked_(transform);
     if (mode_ == ControlMode::Holding) {
         hold_command_.header.stamp = get_clock()->now();
         command_pub_->publish(hold_command_);
@@ -30,7 +28,7 @@ MoveToPoseServer::GoalStatus MoveToPoseServer::install_(
 {
     std::scoped_lock lock(goal_mutex_, ctrl_mutex_);
     if (active_ != goal) return GoalStatus::Preempted;
-    if (cancel_requested_ || goal->is_canceling()) {
+    if (goal->is_canceling()) {
         clear_trajectory_locked_();
         return GoalStatus::Cancelled;
     }
@@ -44,7 +42,7 @@ bool MoveToPoseServer::stop_for_replan_(const std::shared_ptr<GoalHandle> & goal
 {
     // (1) Return the held endpoint only after braking completes.
     std::scoped_lock lock(goal_mutex_, ctrl_mutex_);
-    if (active_ != goal || cancel_requested_ || goal->is_canceling()) return false;
+    if (active_ != goal || goal->is_canceling()) return false;
     if (mode_ == ControlMode::Braking || state_.name.empty()) return false;
     if (mode_ == ControlMode::Holding) {
         start = held_state_locked_();
@@ -52,7 +50,15 @@ bool MoveToPoseServer::stop_for_replan_(const std::shared_ptr<GoalHandle> & goal
     }
     if (traj_points_.empty()) return false;
 
-    // (2) Replace the trajectory with braking from the last commanded position and velocity.
+    // (2) Brake first; the replan starts from the held endpoint.
+    brake_locked_();
+    return false;
+}
+
+void MoveToPoseServer::brake_locked_()
+{
+    // Braking starts from the last commanded position and velocity, so the command stays continuous
+    if (traj_points_.empty()) return;
     const auto & point = traj_points_[std::min(idx_, traj_points_.size() - 1)];
     const JointState brake_start{traj_names_, point.positions, point.velocities, {}};
     const auto brake = planner_->brake(
@@ -63,9 +69,15 @@ bool MoveToPoseServer::stop_for_replan_(const std::shared_ptr<GoalHandle> & goal
     empty_path.header.frame_id = frame_;
     empty_path.header.stamp = traj_start_;
     path_pub_->publish(empty_path);
-    RCLCPP_INFO(get_logger(), "Braking before replan: %zu waypoints, %.3f s",
+    RCLCPP_INFO(get_logger(), "Braking: %zu waypoints, %.3f s",
                 traj_points_.size(), rclcpp::Duration(traj_points_.back().time_from_start).seconds());
-    return false;
+}
+
+double MoveToPoseServer::feedback_age_locked_()
+{
+    // An unstamped message counts as stale, so a publisher that leaves the header empty is caught at the first goal
+    if (last_feedback_.nanoseconds() == 0) return std::numeric_limits<double>::infinity();
+    return (get_clock()->now() - last_feedback_).seconds();
 }
 
 void MoveToPoseServer::clear_trajectory_()
@@ -90,6 +102,7 @@ void MoveToPoseServer::set_trajectory_locked_(Trajectory trajectory, ControlMode
     traj_start_ = get_clock()->now();
     mode_ = mode;
     hold_command_ = JointStateMsg();
+    release_after_brake_ = false;
 }
 
 JointState MoveToPoseServer::held_state_locked_()
@@ -136,7 +149,7 @@ void MoveToPoseServer::track_trajectory_locked_()
         ++idx_;
     }
     const auto & point = traj_points_[idx_];
-    error_ = joint_error_locked_(point.positions);
+    update_errors_locked_(point.positions);
 
     // (2) Publish the command and handle the final sample.
     JointStateMsg cmd;
@@ -155,7 +168,10 @@ void MoveToPoseServer::track_trajectory_locked_()
 
 void MoveToPoseServer::complete_trajectory_locked_()
 {
-    if (mode_ == ControlMode::Braking && hold_endpoint_locked_()) {
+    if (mode_ == ControlMode::Braking && release_after_brake_) {
+        clear_trajectory_locked_();
+        RCLCPP_INFO(get_logger(), "Braking complete; released the arm");
+    } else if (mode_ == ControlMode::Braking && hold_endpoint_locked_()) {
         RCLCPP_INFO(get_logger(), "Braking complete; holding endpoint for replanning");
     } else if (hold_between_steps_ && hold_endpoint_locked_()) {
         hold_since_ = get_clock()->now();
@@ -177,15 +193,6 @@ void MoveToPoseServer::check_control_period_()
         }
     }
     last_tick_ = tick;
-}
-
-void MoveToPoseServer::publish_poses_locked_(const Eigen::MatrixXd & transform)
-{
-    if (transform.size() == 0) return;
-    left_ee_pub_->publish(convertToPoseStamped(
-        transform * controller_model_->get_current_left_ee_pose(), frame_, get_clock()->now()));
-    right_ee_pub_->publish(convertToPoseStamped(
-        transform * controller_model_->get_current_right_ee_pose(), frame_, get_clock()->now()));
 }
 
 std::vector<double> MoveToPoseServer::feedforward_torque_locked_(
@@ -222,9 +229,10 @@ std::vector<double> MoveToPoseServer::feedforward_torque_locked_(
     return effort;
 }
 
-double MoveToPoseServer::joint_error_locked_(const std::vector<double> & target)
+void MoveToPoseServer::update_errors_locked_(const std::vector<double> & target)
 {
     double sum_sq = 0.0;
+    double largest = 0.0;
     size_t counted = 0;
     const size_t n = std::min(traj_names_.size(), target.size());
     for (size_t i = 0; i < n; ++i) {
@@ -232,12 +240,14 @@ double MoveToPoseServer::joint_error_locked_(const std::vector<double> & target)
             if (traj_names_[i] == state_.name[j]) {
                 const double d = target[i] - state_.position[j];
                 sum_sq += d * d;
+                largest = std::max(largest, std::abs(d));
                 ++counted;
                 break;
             }
         }
     }
-    return counted > 0 ? std::sqrt(sum_sq / counted) : 0.0;
+    error_ = counted > 0 ? std::sqrt(sum_sq / counted) : 0.0;
+    max_error_ = largest;
 }
 
 } // namespace g1_pilot

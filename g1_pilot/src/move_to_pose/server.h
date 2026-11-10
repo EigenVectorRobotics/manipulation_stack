@@ -8,8 +8,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
-#include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/buffer.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
@@ -36,7 +36,6 @@ using MoveToPoseGoal = MoveToPoseAction::Goal;
 using MoveToPoseFeedback = MoveToPoseAction::Feedback;
 using MoveToPoseResult = MoveToPoseAction::Result;
 using GoalHandle = rclcpp_action::ServerGoalHandle<MoveToPoseAction>;
-using Trigger = std_srvs::srv::Trigger;
 
 class MoveToPoseServer : public rclcpp::Node {
 public:
@@ -61,10 +60,10 @@ private:
         const rclcpp_action::GoalUUID &, std::shared_ptr<const MoveToPoseGoal> goal);
     rclcpp_action::CancelResponse on_cancel_(std::shared_ptr<GoalHandle> goal);
     void on_accepted_(std::shared_ptr<GoalHandle> goal);
-    void on_cancel_service_(std::shared_ptr<Trigger::Request>, std::shared_ptr<Trigger::Response> response);
     GoalStatus goal_status_(const std::shared_ptr<GoalHandle> & goal);
     void finish_(const std::shared_ptr<GoalHandle> & goal,
                  bool success, double error, const std::string & message);
+    void fail_(const std::shared_ptr<GoalHandle> & goal, const std::string & message);
     void set_target_topic_(const std::string & topic);
     void clear_target_topic_();
     void on_live_target_(PoseStamped::SharedPtr msg);
@@ -73,8 +72,13 @@ private:
     // Planning and frame conversion: planning.cpp.
     void worker_loop_();
     void run_(const std::shared_ptr<GoalHandle> & goal);
+    std::string take_start_(const std::shared_ptr<GoalHandle> & goal, JointState & start);
     void monitor_(const std::shared_ptr<GoalHandle> & goal);
     bool report_progress_(const std::shared_ptr<GoalHandle> & goal);
+    std::string execution_failure_(bool left);
+    bool near_target_(const JointState & state, const Eigen::MatrixXd & target, bool left);
+    void check_reach_(const Plan & plan, const Eigen::MatrixXd & target);
+    void record_plan_failure_(const std::shared_ptr<GoalHandle> & goal, const std::string & message);
     Plan plan_(const JointState & start, const Eigen::MatrixXd & target, bool left, bool replan);
     Plan to_plan_(const HumanoidPilot::JointTrajectory & planned, bool left);
     void try_replan_(const std::shared_ptr<GoalHandle> & goal);
@@ -92,6 +96,8 @@ private:
     GoalStatus install_(const std::shared_ptr<GoalHandle> & goal,
                         const Trajectory & trajectory, const Eigen::MatrixXd & target, double lock_time);
     bool stop_for_replan_(const std::shared_ptr<GoalHandle> & goal, JointState & start);
+    void brake_locked_();
+    double feedback_age_locked_();
     void clear_trajectory_();
     void clear_trajectory_locked_();
     void set_trajectory_locked_(Trajectory trajectory, ControlMode mode);
@@ -99,11 +105,10 @@ private:
     bool hold_endpoint_locked_();
     void control_tick_();
     void check_control_period_();
-    void publish_poses_locked_(const Eigen::MatrixXd & transform);
     void track_trajectory_locked_();
     void complete_trajectory_locked_();
     std::vector<double> feedforward_torque_locked_(const TrajectoryPoint & point);
-    double joint_error_locked_(const std::vector<double> & target);
+    void update_errors_locked_(const std::vector<double> & target);
 
     // The worker owns the planner; the control timer owns the controller model.
     std::unique_ptr<Humanoid> planner_;
@@ -114,29 +119,32 @@ private:
     std::atomic<bool> stopping_{false};
     std::chrono::steady_clock::time_point last_tick_{};
     std::chrono::steady_clock::time_point last_replan_{};
+    // Consecutive replan or final-leg failures, and when the arm last fell off its trajectory (worker only)
+    int plan_failures_ = 0;
+    std::chrono::steady_clock::time_point off_track_since_{};
 
     rclcpp::Publisher<JointStateMsg>::SharedPtr command_pub_;
-    rclcpp::Publisher<PoseStamped>::SharedPtr left_ee_pub_;
-    rclcpp::Publisher<PoseStamped>::SharedPtr right_ee_pub_;
     rclcpp::Publisher<Path>::SharedPtr path_pub_;
     rclcpp::Subscription<JointStateMsg>::SharedPtr feedback_sub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     rclcpp::CallbackGroup::SharedPtr cb_group_;
     rclcpp_action::Server<MoveToPoseAction>::SharedPtr action_server_;
-    rclcpp::Service<Trigger>::SharedPtr cancel_service_;
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+    std::shared_ptr<tf2_ros::StaticTransformBroadcaster> ee_broadcaster_;
 
     // ctrl_mutex_ protects feedback and every trajectory transition.
     std::mutex ctrl_mutex_;
     JointState state_;
+    rclcpp::Time last_feedback_{0, 0, RCL_ROS_TIME};  // header stamp of the latest feedback
     ControlMode mode_ = ControlMode::Idle;
     std::vector<std::string> traj_names_;
     std::vector<TrajectoryPoint> traj_points_;
     JointStateMsg hold_command_;
     size_t idx_ = 0;
     rclcpp::Time traj_start_;
-    double error_ = 0.0;
+    double error_ = 0.0;      // joint RMS, reported as feedback
+    double max_error_ = 0.0;  // largest single joint, used to detect an arm that is not following
     Eigen::MatrixXd planned_for_;
     // The planned target in its own frame, so body sway in the pelvis frame does not look like a moved target
     Eigen::MatrixXd planned_source_;
@@ -144,6 +152,7 @@ private:
     double lock_time_ = -1.0;
     bool final_leg_refreshed_ = false;
     bool hold_between_steps_ = false;
+    bool release_after_brake_ = false;  // a failed goal stops commanding once its brake ends
     rclcpp::Time hold_since_;
 
     // Final-leg stepping (worker only): the goal frozen in the foot frame, re-mapped into the pelvis before every step
@@ -166,7 +175,6 @@ private:
     std::condition_variable cv_;
     std::shared_ptr<GoalHandle> active_;
     std::shared_ptr<GoalHandle> pending_;
-    bool cancel_requested_ = false;
 };
 
 } // namespace g1_pilot

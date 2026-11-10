@@ -1,4 +1,5 @@
 #include "server.h"
+#include "../helper_funcs.h"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <functional>
@@ -11,26 +12,21 @@ MoveToPoseServer::MoveToPoseServer() : Node("move_to_pose_server")
     // (1) Initialize configuration, models, and ROS interfaces.
     declare_parameters_();
     create_models_();
-    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
-    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
     create_publishers_();
     create_action_server_();
 
-    // (2) Start feedback, control, and the planning worker.
+    // (2) Start feedback and control.
     feedback_sub_ = create_subscription<JointStateMsg>(
         get_parameter("feedback_topic").as_string(), 10,
         [this](JointStateMsg::UniquePtr msg) {
             std::lock_guard<std::mutex> lock(ctrl_mutex_);
             state_ = {msg->name, msg->position, msg->velocity, msg->effort};
+            last_feedback_ = rclcpp::Time(msg->header.stamp, RCL_ROS_TIME);
         });
     control_timer_ = create_wall_timer(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::duration<double>(control_period_)),
         std::bind(&MoveToPoseServer::control_tick_, this));
-    worker_ = std::thread(&MoveToPoseServer::worker_loop_, this);
-    const auto action = get_parameter("action_name").as_string();
-    RCLCPP_INFO(get_logger(), "move_to_pose ready: action '%s', cancel '%s/cancel'",
-                action.c_str(), action.c_str());
 }
 
 MoveToPoseServer::~MoveToPoseServer()
@@ -51,8 +47,6 @@ void MoveToPoseServer::declare_parameters_()
     declare_parameter<int>("num_dof", 29);
     declare_parameter<std::string>("feedback_topic", "feedback");
     declare_parameter<std::string>("position_control_topic", "position_control");
-    declare_parameter<std::string>("left_ee_pose_topic", "left_ee_pose");
-    declare_parameter<std::string>("right_ee_pose_topic", "right_ee_pose");
     declare_parameter<std::string>("traj_topic", "traj");
     declare_parameter<std::string>("action_name", "move_to_pose");
     declare_parameter<std::string>("planning_frame", "pelvis");
@@ -77,6 +71,15 @@ void MoveToPoseServer::declare_parameters_()
     declare_parameter<bool>("use_gripper_estimate", true);
     declare_parameter<double>("gripper_estimate_max_age", 0.5);
     declare_parameter<double>("gripper_estimate_max_error", 0.03);
+
+    // (3) Failure detection.
+    declare_parameter<double>("goal_position_tolerance", 0.005);
+    declare_parameter<double>("goal_orientation_tolerance", 0.1);
+    declare_parameter<int>("max_plan_failures", 3);
+    declare_parameter<double>("feedback_timeout", 0.5);
+    declare_parameter<double>("max_tracking_error", 0.2);
+    declare_parameter<double>("tracking_error_timeout", 1.0);
+    declare_parameter<double>("near_target_distance", 0.02);
     frame_ = get_parameter("planning_frame").as_string();
     control_period_ = get_parameter("control_period").as_double();
 }
@@ -95,9 +98,12 @@ void MoveToPoseServer::create_models_()
 void MoveToPoseServer::create_publishers_()
 {
     command_pub_ = create_publisher<JointStateMsg>(get_parameter("position_control_topic").as_string(), 10);
-    left_ee_pub_ = create_publisher<PoseStamped>(get_parameter("left_ee_pose_topic").as_string(), 10);
-    right_ee_pub_ = create_publisher<PoseStamped>(get_parameter("right_ee_pose_topic").as_string(), 10);
     path_pub_ = create_publisher<Path>(get_parameter("traj_topic").as_string(), 10);
+
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+    ee_broadcaster_ = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
+    ee_broadcaster_->sendTransform(ee_static_transforms(*planner_, get_clock()->now()));
 }
 
 void MoveToPoseServer::create_action_server_()
@@ -110,10 +116,8 @@ void MoveToPoseServer::create_action_server_()
         std::bind(&MoveToPoseServer::on_cancel_, this, std::placeholders::_1),
         std::bind(&MoveToPoseServer::on_accepted_, this, std::placeholders::_1),
         rcl_action_server_get_default_options(), cb_group_);
-    cancel_service_ = create_service<Trigger>(
-        action + "/cancel",
-        std::bind(&MoveToPoseServer::on_cancel_service_, this, std::placeholders::_1, std::placeholders::_2),
-        rclcpp::ServicesQoS(), cb_group_);
+    worker_ = std::thread(&MoveToPoseServer::worker_loop_, this);
+    RCLCPP_INFO(get_logger(), "move_to_pose ready: action '%s'", action.c_str());
 }
 
 rclcpp_action::GoalResponse MoveToPoseServer::on_goal_(
@@ -126,8 +130,13 @@ rclcpp_action::GoalResponse MoveToPoseServer::on_goal_(
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
-rclcpp_action::CancelResponse MoveToPoseServer::on_cancel_(const std::shared_ptr<GoalHandle>)
+rclcpp_action::CancelResponse MoveToPoseServer::on_cancel_(const std::shared_ptr<GoalHandle> goal)
 {
+    // Commands stop at once; the worker then ends the goal as cancelled
+    {
+        std::scoped_lock lock(goal_mutex_, ctrl_mutex_);
+        if (active_ == goal) clear_trajectory_locked_();
+    }
     cv_.notify_all();
     return rclcpp_action::CancelResponse::ACCEPT;
 }
@@ -138,48 +147,15 @@ void MoveToPoseServer::on_accepted_(const std::shared_ptr<GoalHandle> goal)
         std::lock_guard<std::mutex> lock(goal_mutex_);
         active_ = goal;
         pending_ = goal;
-        cancel_requested_ = false;
     }
     set_target_topic_(goal->get_goal()->target_topic);
     cv_.notify_all();
 }
 
-void MoveToPoseServer::on_cancel_service_(
-    const std::shared_ptr<Trigger::Request>, std::shared_ptr<Trigger::Response> response)
-{
-    // (1) Stop control immediately and identify the active goal.
-    std::shared_ptr<GoalHandle> goal;
-    {
-        std::lock_guard<std::mutex> lock(goal_mutex_);
-        cancel_requested_ = true;
-        goal = active_;
-    }
-    clear_trajectory_();
-    cv_.notify_all();
-
-    if (!goal) {
-        response->success = false;
-        response->message = "No active goal; trajectory cleared anyway";
-        RCLCPP_WARN(get_logger(), "Cancel: %s", response->message.c_str());
-        return;
-    }
-    // (2) Reply after the worker terminates the goal.
-    std::unique_lock<std::mutex> lock(goal_mutex_);
-    const bool finished = cv_.wait_for(lock, 5s, [this, &goal] {
-        return active_ != goal || stopping_.load();
-    });
-    lock.unlock();
-
-    response->success = finished;
-    response->message = finished
-        ? "Cancelled: trajectory reset, controller stopped commanding"
-        : "Trajectory reset, but the goal did not terminate within 5 s";
-    RCLCPP_INFO(get_logger(), "Cancel: %s", response->message.c_str());
-}
-
 void MoveToPoseServer::finish_(const std::shared_ptr<GoalHandle> & goal,
                                bool success, double error, const std::string & message)
 {
+    if (!goal->is_active()) return;
     auto result = std::make_shared<MoveToPoseResult>();
     result->success = success;
     result->final_error = error;
@@ -199,6 +175,26 @@ void MoveToPoseServer::finish_(const std::shared_ptr<GoalHandle> & goal,
     }
     if (was_active) clear_target_topic_();
     cv_.notify_all();
+}
+
+void MoveToPoseServer::fail_(const std::shared_ptr<GoalHandle> & goal, const std::string & message)
+{
+    // A failure mid-motion brakes before the node stops commanding, as a finished goal does
+    RCLCPP_ERROR(get_logger(), "Goal failed: %s", message.c_str());
+    stepping_ = false;
+    leg_step_ = 0;
+    double error = 0.0;
+    {
+        std::scoped_lock lock(goal_mutex_, ctrl_mutex_);
+        hold_between_steps_ = false;
+        if (active_ == goal) {
+            if (mode_ == ControlMode::Tracking) brake_locked_();
+            if (mode_ == ControlMode::Braking) release_after_brake_ = true;
+            else if (mode_ == ControlMode::Holding) clear_trajectory_locked_();
+        }
+        error = error_;
+    }
+    finish_(goal, false, error, message);
 }
 
 void MoveToPoseServer::set_target_topic_(const std::string & topic)
@@ -252,7 +248,7 @@ MoveToPoseServer::GoalStatus MoveToPoseServer::goal_status_(const std::shared_pt
 {
     std::lock_guard<std::mutex> lock(goal_mutex_);
     if (active_ != goal) return GoalStatus::Preempted;
-    if (cancel_requested_ || goal->is_canceling()) return GoalStatus::Cancelled;
+    if (goal->is_canceling()) return GoalStatus::Cancelled;
     return GoalStatus::Active;
 }
 

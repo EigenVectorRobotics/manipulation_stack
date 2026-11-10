@@ -7,6 +7,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include "helper_funcs.h"
+#include <tf2_ros/static_transform_broadcaster.h>
 
 #include "humanoid_manipulation_interfaces/action/control_joint_trajectory.hpp"
 
@@ -62,17 +63,12 @@ public:
 
         /* Publishers */
         this->declare_parameter<std::string>("position_control_topic", "position_control");
-        this->declare_parameter<std::string>("left_ee_pose_topic", "left_ee_pose");
-        this->declare_parameter<std::string>("right_ee_pose_topic", "right_ee_pose");
 
         joint_states_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
             this->get_parameter("position_control_topic").as_string(), 10);
 
-        left_ee_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
-            this->get_parameter("left_ee_pose_topic").as_string(), 10);
-
-        right_ee_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>(
-            this->get_parameter("right_ee_pose_topic").as_string(), 10);
+        ee_broadcaster_ = std::make_shared<tf2_ros::StaticTransformBroadcaster>(this);
+        ee_broadcaster_->sendTransform(ee_static_transforms(*arm_handle_, this->get_clock()->now()));
 
         /* Subscribers */
         this->declare_parameter<std::string>("feedback_topic", "feedback");
@@ -102,8 +98,7 @@ public:
 private:
     // Publishers
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_states_pub_;
-    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr left_ee_pose_pub_;
-    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr right_ee_pose_pub_;
+    std::shared_ptr<tf2_ros::StaticTransformBroadcaster> ee_broadcaster_;
 
     // Subscribers
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr feedback_sub_;
@@ -116,10 +111,6 @@ private:
 
     // Arm handle
     std::unique_ptr<Humanoid> arm_handle_;
-
-    // EE state
-    Eigen::MatrixXd left_ee_pose_;
-    Eigen::MatrixXd right_ee_pose_;
 
     // Trajectory and control state
     std::vector<std::string> trajectory_joint_names_;
@@ -250,12 +241,6 @@ private:
         }
 
         arm_handle_->update(current_state_);
-
-        left_ee_pose_ = arm_handle_->get_current_left_ee_pose();
-        right_ee_pose_ = arm_handle_->get_current_right_ee_pose();
-
-        left_ee_pose_pub_->publish(convertToPoseStamped(left_ee_pose_, "pelvis", this->get_clock()->now()));
-        right_ee_pose_pub_->publish(convertToPoseStamped(right_ee_pose_, "pelvis", this->get_clock()->now()));
 
         if (trajectory_points_.empty() || next_waypoint_idx_ >= trajectory_points_.size()) {
             return;

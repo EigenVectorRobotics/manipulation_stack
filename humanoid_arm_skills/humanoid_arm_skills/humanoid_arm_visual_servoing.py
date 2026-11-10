@@ -16,20 +16,17 @@ from rclpy.node import Node
 from rclpy.action import ActionServer, ActionClient, GoalResponse, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Bool, Empty, String
-from std_srvs.srv import Trigger
+from action_msgs.srv import CancelGoal
 
 from humanoid_manipulation_interfaces.action import VisualServoingArm as VisualServoing
 from humanoid_manipulation_interfaces.action import MoveToPose
 
 from humanoid_arm_skills.utils import pose_distance
-from humanoid_arm_skills.replan_policies import (
-    InPostGoalCooldown,
-    ReplanContext,
-    ReplanPolicyChain,
-)
 
 
 class VisualServoArmNode(Node):
@@ -47,15 +44,10 @@ class VisualServoArmNode(Node):
             '/track_3d/selected_normal_pose_filtered/arm_approach').value
         self.keyboard_input_topic = self.declare_parameter(
             'keyboard_input_topic', '/keyboard_input').value
-        self.left_ee_pose_topic = self.declare_parameter(
-            'left_ee_pose_topic', '/left_ee_pose').value
-        self.right_ee_pose_topic = self.declare_parameter(
-            'right_ee_pose_topic', '/right_ee_pose').value
+        self.left_ee_frame = self.declare_parameter('left_ee_frame', 'left_ee').value
+        self.right_ee_frame = self.declare_parameter('right_ee_frame', 'right_ee').value
         self.move_to_pose_action = self.declare_parameter(
             'move_to_pose_action', '/move_to_pose').value
-        self.move_to_pose_cancel_service = self.declare_parameter(
-            'move_to_pose_cancel_service',
-            self.move_to_pose_action + '/cancel').value
         self.reset_filter_topic = self.declare_parameter(
             'reset_filter_topic', 'reset_filter').value
         self.require_seed = self.declare_parameter('require_seed', True).value
@@ -67,16 +59,19 @@ class VisualServoArmNode(Node):
         self.declare_parameter('post_goal_cooldown', 1.0)
         self.declare_parameter('seed_timeout', 30.0)
         self.declare_parameter('seed_max_requests', 2)
+        self.declare_parameter('first_pose_timeout', 10.0)
+        self.declare_parameter('server_wait_timeout', 5.0)
+        self.declare_parameter('server_lost_timeout', 2.0)
 
         # ── Persistent state ──
         self.last_pose_time = None
         self.last_goal = None
         self._seed_state = 'tracking'
+        self._seed_tracked_at = None  # monotonic time tracking of the current seed began
+        self._closest = (float('inf'), float('inf'))  # nearest (distance, orientation error) to the goal
         self.is_tracking = False
         self._active_goal_handle = None
         self._controller_succeeded = False
-        self.left_ee_pose = None
-        self.right_ee_pose = None
         self._left_arm = False
         self._goal_completed_time = 0.0  # monotonic time of last goal success
 
@@ -93,14 +88,8 @@ class VisualServoArmNode(Node):
         self.create_subscription(
             Bool, '/track_3d/is_tracking', self._is_tracking_cb,
             5, callback_group=cb_group)
-        self.create_subscription(
-            PoseStamped, self.left_ee_pose_topic,
-            lambda msg: setattr(self, 'left_ee_pose', msg),
-            5, callback_group=cb_group)
-        self.create_subscription(
-            PoseStamped, self.right_ee_pose_topic,
-            lambda msg: setattr(self, 'right_ee_pose', msg),
-            5, callback_group=cb_group)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         # ── Publishers ──
         self.track3d_reset_pub = self.create_publisher(
@@ -117,10 +106,11 @@ class VisualServoArmNode(Node):
             callback_group=cb_group)
 
         # Stopping the arm must not depend on this node holding the right goal
-        # handle. The service clears the trajectory whatever is running, so it
-        # is the reliable stop; cancelling the handle is the tidy one.
+        # handle. A cancel-all request stops whatever is running, so it is the
+        # reliable stop; cancelling the handle is the fallback.
         self._move_cancel_client = self.create_client(
-            Trigger, self.move_to_pose_cancel_service, callback_group=cb_group)
+            CancelGoal, self.move_to_pose_action + '/_action/cancel_goal',
+            callback_group=cb_group)
 
         # ── Action server ──
         self._action_server = ActionServer(
@@ -133,10 +123,6 @@ class VisualServoArmNode(Node):
             callback_group=cb_group,
         )
 
-        self._goal_acceptance_chain = ReplanPolicyChain([
-            InPostGoalCooldown(),
-        ])
-
         self.get_logger().info(
             '\033[32m\033[1m\u2714\033[0m humanoid_arm_visual_servoing: ready '
             '(action server, target streaming)')
@@ -148,9 +134,11 @@ class VisualServoArmNode(Node):
             self.get_logger().warn('Rejecting goal — another is active')
             return GoalResponse.REJECT
 
-        ctx = ReplanContext(node=self, now=time.monotonic(),
-                            left_arm=goal_request.left_arm)
-        if self._goal_acceptance_chain.should_skip(ctx, self.get_logger()):
+        since = time.monotonic() - self._goal_completed_time
+        cooldown = self.get_parameter('post_goal_cooldown').value
+        if since < cooldown:
+            self.get_logger().warn(
+                f'Rejecting goal — {since:.2f} s after the last success (cooldown {cooldown} s)')
             return GoalResponse.REJECT
 
         return GoalResponse.ACCEPT
@@ -172,6 +160,7 @@ class VisualServoArmNode(Node):
         self.last_goal = None
         self.is_tracking = False
         self._controller_succeeded = False
+        self._closest = (float('inf'), float('inf'))
         with self._motion_lock:
             # Retires any motion still in flight from a previous VS goal.
             self._motion_generation += 1
@@ -188,58 +177,48 @@ class VisualServoArmNode(Node):
         feedback = VisualServoing.Feedback()
 
         motion_goal_sent = False
-        rate = self.create_rate(self.get_parameter('goal_rate').value)
+        server_wait_since = None
+        server_lost_since = None
+        # A Rate's timer may never fire inside an action callback, so the loop sleeps on its own executor thread
+        period = 1.0 / self.get_parameter('goal_rate').value
 
         try:
             while rclpy.ok():
-                # ── Start motion once poses are available ──
-                if not motion_goal_sent:
-                    ee_pose = (self.left_ee_pose if self._left_arm
-                               else self.right_ee_pose)
-                    if self.last_goal is not None and ee_pose is not None:
-                        self.get_logger().info('Sending initial motion goal')
-                        motion_goal_sent = self._send_motion_goal()
-
-                # ── Controller succeeded ──
-                if self._controller_succeeded:
-                    self.get_logger().info(
-                        'Controller succeeded — completing goal')
-                    self._goal_completed_time = time.monotonic()
-                    result.success = True
-                    result.message = 'Controller reached target'
-                    self._fill_result(result, self._left_arm)
-                    self._reset_track3d()
-                    goal_handle.succeed()
-                    return result
+                now = time.monotonic()
 
                 # ── Cancellation ──
                 if goal_handle.is_cancel_requested:
                     self.get_logger().info('Goal cancelled')
                     result.success = False
                     result.message = 'Cancelled'
-                    goal_handle.canceled()
-                    self._active_goal_handle = None
-                    self._cancel_motion_goal()
-                    self.last_goal = None
-                    self.last_pose_time = None
-                    self._reset_track3d()
+                    goal_handle.canceled(result)
                     return result
 
+                # ── Controller succeeded ──
+                if self._controller_succeeded:
+                    self.get_logger().info(
+                        'Controller succeeded — completing goal')
+                    self._goal_completed_time = now
+                    result.success = True
+                    result.message = 'Controller reached target'
+                    self._fill_result(result, self._left_arm)
+                    goal_handle.succeed(result)
+                    return result
+
+                with self._motion_lock:
+                    motion_failure = self._motion_failure
+                if motion_failure is not None:
+                    return self._abort(goal_handle, result, motion_failure)
+
+                # ── Seeding ──
                 if (self.require_seed and self._seed_state != 'tracking'
-                        and time.monotonic() - seed_requested_at
+                        and now - seed_requested_at
                         > self.get_parameter('seed_timeout').value):
                     max_requests = self.get_parameter('seed_max_requests').value
                     if seed_requests >= max_requests:
-                        self.get_logger().warn(
-                            f'No seed for "{target}" after {seed_requests} '
-                            'request(s) — aborting')
-                        result.success = False
-                        result.message = (
+                        return self._abort(
+                            goal_handle, result,
                             f'No target seed after {seed_requests} request(s)')
-                        self._fill_result(result, self._left_arm)
-                        self._reset_track3d()
-                        goal_handle.abort()
-                        return result
                     seed_requests += 1
                     self.get_logger().warn(
                         f'No seed for "{target}" yet — asking again '
@@ -247,27 +226,40 @@ class VisualServoArmNode(Node):
                     self._request_target(target)
                     seed_requested_at = time.monotonic()
 
-                with self._motion_lock:
-                    motion_failure = self._motion_failure
-                if motion_failure is not None:
-                    result.success = False
-                    result.message = motion_failure
-                    self._fill_result(result, self._left_arm)
-                    goal_handle.abort()
-                    return result
+                # ── Start motion once a target pose has arrived ──
+                if not motion_goal_sent:
+                    tracked_at = self._seed_tracked_at if self.require_seed else seed_requested_at
+                    first_pose_timeout = self.get_parameter('first_pose_timeout').value
+                    if (self.last_goal is None and tracked_at is not None
+                            and now - tracked_at > first_pose_timeout):
+                        return self._abort(
+                            goal_handle, result,
+                            f'No filtered target pose within {first_pose_timeout:g} s of tracking')
+                    if self.last_goal is not None:
+                        if self._move_client.server_is_ready():
+                            self.get_logger().info('Sending initial motion goal')
+                            motion_goal_sent = self._send_motion_goal()
+                        else:
+                            server_wait_since = server_wait_since or now
+                            if now - server_wait_since > self.get_parameter('server_wait_timeout').value:
+                                return self._abort(
+                                    goal_handle, result, 'move_to_pose action server not available')
+
+                # ── move_to_pose gone mid-goal: its result would never arrive ──
+                if motion_goal_sent and not self._move_client.server_is_ready():
+                    server_lost_since = server_lost_since or now
+                    if now - server_lost_since > self.get_parameter('server_lost_timeout').value:
+                        return self._abort(
+                            goal_handle, result, 'move_to_pose action server lost during the motion')
+                else:
+                    server_lost_since = None
 
                 elapsed = (self.get_clock().now().nanoseconds
                            - start_time) * 1e-9
 
                 # ── Timeout ──
                 if elapsed > self.get_parameter('action_timeout').value:
-                    self.get_logger().warn('Action timed out')
-                    result.success = False
-                    result.message = 'Action timed out'
-                    self._fill_result(result, self._left_arm)
-                    self._reset_track3d()
-                    goal_handle.abort()
-                    return result
+                    return self._abort(goal_handle, result, 'Action timed out')
 
                 # ── Tracking lost check ──
                 tracking_lost = False
@@ -278,7 +270,7 @@ class VisualServoArmNode(Node):
                         tracking_lost = True
 
                 # ── Publish feedback ──
-                dist, ori_err = self._compute_errors(self._left_arm)
+                dist, ori_err = self._track_errors(self._left_arm)
                 feedback.distance_to_goal = dist
                 feedback.orientation_error_deg = ori_err
                 feedback.tracking_lost = tracking_lost
@@ -287,22 +279,27 @@ class VisualServoArmNode(Node):
                     feedback.current_goal = self.last_goal
                 goal_handle.publish_feedback(feedback)
 
-                rate.sleep()
+                time.sleep(period)
 
         finally:
             self._active_goal_handle = None
             self._cancel_motion_goal()
+            self._reset_track3d()
             self.last_goal = None
             self.last_pose_time = None
+
+    def _abort(self, goal_handle, result, message):
+        self.get_logger().warn(f'Aborting: {message}')
+        result.success = False
+        result.message = message
+        self._fill_result(result, self._left_arm)
+        goal_handle.abort(result)
+        return result
 
     # ── Initial motion ──
 
     def _send_motion_goal(self):
         target_pose = self.last_goal
-        if not self._move_client.server_is_ready():
-            self.get_logger().warn('move_to_pose action server not available')
-            return False
-
         with self._motion_lock:
             generation = self._motion_generation
 
@@ -365,7 +362,7 @@ class VisualServoArmNode(Node):
 
     def _move_feedback_cb(self, feedback_msg):
         fb = feedback_msg.feedback
-        dist, _ = self._compute_errors(self._left_arm)
+        dist, _ = self._track_errors(self._left_arm)
 
         self.get_logger().debug(
             f'move_to_pose feedback: goal distance={dist:.4f}m '
@@ -400,12 +397,11 @@ class VisualServoArmNode(Node):
     def _cancel_motion_goal(self):
         """Stop the arm and retire any motion this node started.
 
-        Two steps, deliberately. The cancel service clears the trajectory in
-        move_to_pose no matter which goal is running, so the arm stops within a
-        control period even if a goal we never saw accepted is the one moving
-        it. Cancelling the handle then terminates our own goal cleanly. The
-        generation is retired too, so an acceptance still in flight is cancelled
-        when it lands.
+        A cancel-all request (zero goal id and stamp) on the action's own cancel
+        service stops every move_to_pose goal, including one whose acceptance
+        we never saw, and move_to_pose stops commanding at once. The generation
+        is retired too, so an acceptance still in flight is cancelled when it
+        lands.
         """
         with self._motion_lock:
             self._motion_generation += 1
@@ -414,7 +410,7 @@ class VisualServoArmNode(Node):
 
         if self._move_cancel_client.service_is_ready():
             try:
-                self._move_cancel_client.call_async(Trigger.Request())
+                self._move_cancel_client.call_async(CancelGoal.Request())
             except Exception as exc:
                 self.get_logger().warn(f'move_to_pose cancel service failed: {exc}')
         else:
@@ -429,13 +425,41 @@ class VisualServoArmNode(Node):
     # ── Helpers ──
 
     def _fill_result(self, result, left_arm):
-        dist, ori_err = self._compute_errors(left_arm)
+        """Report the closest approach: a press ends with a retreat, so the last pose is the pre-grasp."""
+        dist, ori_err = self._track_errors(left_arm)
+        if self._closest[0] < dist:
+            dist, ori_err = self._closest
         result.final_distance = dist
         result.orientation_error_deg = ori_err
 
+    def _track_errors(self, left_arm):
+        """Current (distance, orientation error) to the goal, also kept as the closest approach."""
+        errors = self._compute_errors(left_arm)
+        if errors[0] < self._closest[0]:
+            self._closest = errors
+        return errors
+
+    def ee_pose(self, left_arm):
+        """Gripper pose in the frame of the latest goal, or None without a goal or TF."""
+        if self.last_goal is None:
+            return None
+        frame = self.last_goal.header.frame_id
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                frame, self.left_ee_frame if left_arm else self.right_ee_frame, Time())
+        except TransformException:
+            return None
+        pose = PoseStamped()
+        pose.header = tf.header
+        pose.pose.position.x = tf.transform.translation.x
+        pose.pose.position.y = tf.transform.translation.y
+        pose.pose.position.z = tf.transform.translation.z
+        pose.pose.orientation = tf.transform.rotation
+        return pose
+
     def _compute_errors(self, left_arm):
         """Return (distance, orientation_error_deg) from EE to goal."""
-        ee_pose = self.left_ee_pose if left_arm else self.right_ee_pose
+        ee_pose = self.ee_pose(left_arm)
         if self.last_goal is None or ee_pose is None:
             return float('inf'), float('inf')
 
@@ -452,6 +476,7 @@ class VisualServoArmNode(Node):
         self.last_goal = None
         self.last_pose_time = None
         self._seed_state = 'reset'
+        self._seed_tracked_at = None
         self._reset_track3d()
         time.sleep(0.3)
         self.keyboard_pub.publish(String(data=target))
@@ -466,6 +491,7 @@ class VisualServoArmNode(Node):
             self._seed_state = 'seeding'
         elif self._seed_state == 'seeding' and msg.data:
             self._seed_state = 'tracking'
+            self._seed_tracked_at = time.monotonic()
             if self._active_goal_handle is not None:
                 self.get_logger().info('Tracking the new seed; accepting its poses')
 

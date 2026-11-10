@@ -42,6 +42,13 @@ class Humanoid {
 
 public:
 
+    // A gripper frame fixed to the child link of parent_joint, offset in that link's frame.
+    struct EEFrame {
+        std::string parent_joint;
+        std::string parent_link;
+        Eigen::Vector3d offset = Eigen::Vector3d::Zero();
+    };
+
     Humanoid(
         const RobotConfig* robot_config = nullptr
     );
@@ -94,9 +101,6 @@ public:
     void reset();
 
     void update(JointState current_state);
-
-    Eigen::MatrixXd get_current_left_ee_pose();
-    Eigen::MatrixXd get_current_right_ee_pose();
 
     Eigen::VectorXd get_current_left_ee_vel();
     Eigen::VectorXd get_current_right_ee_vel();
@@ -208,14 +212,16 @@ public:
 
     void setLeftArm(bool left_arm);
 
+    // Why the last plan came back empty; empty when it succeeded.
+    std::string plan_failure();
+
+    const EEFrame& get_left_ee() const { return left_ee_; }
+    const EEFrame& get_right_ee() const { return right_ee_; }
+
 protected:
 
     struct Impl;
     std::unique_ptr<Impl> impl_;
-    struct EEFrame {
-        std::string parent_joint;
-        Eigen::Vector3d offset = Eigen::Vector3d::Zero();
-    };
 
     void extract_config();
     void add_end_effector_frames();

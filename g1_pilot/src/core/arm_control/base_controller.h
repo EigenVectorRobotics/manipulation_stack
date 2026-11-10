@@ -15,8 +15,6 @@ public:
 
     void update(JointState current_state);
 
-    Eigen::MatrixXd get_current_left_ee_pose(){return current_left_ee_pose_.toHomogeneousMatrix();};
-    Eigen::MatrixXd get_current_right_ee_pose(){return current_right_ee_pose_.toHomogeneousMatrix();};
 
     Eigen::VectorXd get_current_left_ee_vel(){return current_left_ee_vel_in_lwa_.toVector();};
     Eigen::VectorXd get_current_right_ee_vel(){return current_right_ee_vel_in_lwa_.toVector();};

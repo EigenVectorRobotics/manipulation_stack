@@ -101,6 +101,9 @@ class JointSpacePlanner {
 
         void setLeftArm(bool left_arm) { left_arm_ = left_arm; }
 
+        // Why the last search returned no path; empty after a success.
+        const std::string& failure() const { return failure_; }
+
     protected:
         bool runRRTStar(
             const Eigen::VectorXd& start_q,
@@ -154,12 +157,15 @@ class JointSpacePlanner {
          */
         void ensureSearchSpace(const Eigen::VectorXd& reference_q);
 
-        static bool poseNear(
+        inline static bool poseNear(
             const Eigen::Matrix4d& a,
             const Eigen::Matrix4d& b,
             const double pos_tol,
             const double rot_tol
-        );
+        ) {
+            if ((a.block<3,1>(0,3) - b.block<3,1>(0,3)).norm() > pos_tol) return false;
+            return Eigen::AngleAxisd(a.block<3,3>(0,0).transpose() * b.block<3,3>(0,0)).angle() <= rot_tol;
+        }
 
         JointState poseToJointConfig(
             const Eigen::MatrixXd& pose,
@@ -217,6 +223,8 @@ class JointSpacePlanner {
         Eigen::Vector3d wall_normal_ = Eigen::Vector3d::UnitX();
         double wall_relax_ = 0.0;
         bool wall_set_ = false;
+
+        std::string failure_;
 };
 
 } // namespace HumanoidPilot
