@@ -323,7 +323,7 @@ void MoveToPoseServer::step_final_leg_(const std::shared_ptr<GoalHandle> & goal)
 Eigen::Vector3d MoveToPoseServer::gripper_estimate_error_(bool left, const Eigen::Matrix3d & target_rotation)
 {
     // Depth-fitted minus encoder gripper position in the pelvis; zero when disabled, stale or implausible
-    constexpr double LEAD_TOWARD_GOAL = 0.003;  // m along the target's x: the planner sees the gripper this much nearer the goal
+    constexpr double LEAD_TOWARD_GOAL = 0.008;  // m along the target's x: the planner sees the gripper this much nearer the goal
     if (!get_parameter("use_gripper_estimate").as_bool()) return Eigen::Vector3d::Zero();
     const std::string base = std::string(left ? "left" : "right") + "_dex1_base_link";
     geometry_msgs::msg::TransformStamped estimate, encoder;
