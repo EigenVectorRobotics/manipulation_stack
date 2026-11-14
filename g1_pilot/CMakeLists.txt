@@ -183,6 +183,7 @@ if(ROS2_DEFAULT)
 
     # Service Servers
     add_executable(plan_trajecory src/plan_trajecory.cpp)
+    add_executable(ik_server src/ik_server.cpp)
 
     # Action Servers
     add_executable(joint_controller src/joint_controller.cpp)
@@ -217,6 +218,9 @@ if(ROS2_DEFAULT)
     target_link_libraries(plan_trajecory g1_pilot)
     ament_target_dependencies(plan_trajecory ${ROS2_DEPS})
 
+    target_link_libraries(ik_server g1_pilot)
+    ament_target_dependencies(ik_server ${ROS2_DEPS})
+
     target_link_libraries(move_to_pose g1_pilot)
     ament_target_dependencies(move_to_pose ${ROS2_DEPS})
 
@@ -228,6 +232,7 @@ if(ROS2_DEFAULT)
         grav_ff
         body_ekf
         plan_trajecory
+        ik_server
         joint_controller
         move_to_pose
         DESTINATION lib/${PROJECT_NAME}

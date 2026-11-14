@@ -11,6 +11,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/MoveToPose.action"
   "action/VisualServoingArm.action"
   "srv/PlanJointTrajectory.srv"
+  "srv/CheckReach.srv"
   DEPENDENCIES geometry_msgs trajectory_msgs
 )
 
