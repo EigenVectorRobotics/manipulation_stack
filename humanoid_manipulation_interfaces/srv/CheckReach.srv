@@ -1,0 +1,12 @@
+# Request: the press target, in any frame TF can turn into pelvis
+geometry_msgs/PoseStamped target_pose
+bool left_arm
+---
+# Response: what move_to_pose would decide, without moving the arm
+bool reachable
+float64 position_error      # m, from the planned path's nearest pose to the target
+float64 orientation_error   # rad, at that pose
+geometry_msgs/Vector3 position_error_pelvis   # m, arm end minus target, pelvis axes (x forward, y left, z up)
+geometry_msgs/Vector3 position_error_target   # m, the same in the target's own axes (x along the button normal)
+geometry_msgs/PoseStamped target_in_pelvis
+string message

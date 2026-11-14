@@ -14,6 +14,7 @@ def generate_launch_description():
     ld.add_action(DeclareLaunchArgument('position_control_topic',
                                         default_value='position_control'))
     ld.add_action(DeclareLaunchArgument('traj_topic', default_value='traj'))
+    ld.add_action(DeclareLaunchArgument('check_reach_service', default_value='/check_reach'))
     ld.add_action(DeclareLaunchArgument('planning_frame',
                                         default_value='left_ankle_roll_link'))
     for axis in 'xyz':
@@ -31,6 +32,21 @@ def generate_launch_description():
             'position_control_topic': LaunchConfiguration('position_control_topic'),
             'traj_topic': LaunchConfiguration('traj_topic'),
             'planning_frame': LaunchConfiguration('planning_frame'),
+            **{f'arm_safety_distance_{axis}': LaunchConfiguration(f'arm_safety_distance_{axis}')
+               for axis in 'xyz'},
+        }],
+    ))
+
+    # Answers move_to_pose's reach check without moving the arm, so it shares the feedback and safety offsets
+    ld.add_action(Node(
+        package='g1_pilot',
+        executable='ik_server',
+        name='ik_server',
+        namespace=LaunchConfiguration('namespace'),
+        output='screen',
+        parameters=[{
+            'service_name': LaunchConfiguration('check_reach_service'),
+            'feedback_topic': LaunchConfiguration('feedback_topic'),
             **{f'arm_safety_distance_{axis}': LaunchConfiguration(f'arm_safety_distance_{axis}')
                for axis in 'xyz'},
         }],
