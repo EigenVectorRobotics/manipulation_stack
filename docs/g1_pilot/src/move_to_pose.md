@@ -27,6 +27,8 @@ A newer goal brakes the previous motion before it plans. The standard action can
 
 Goal poses transform into pelvis coordinates for the core; published paths and end-effector poses use `planning_frame`. Target conversion retains the existing latest-TF behavior.
 
+The final leg freezes its goal in `final_leg_anchor_frame`, read from TF before every step. The robot launch sets it to the body EKF's `foot_world`, which holds still while the body leans into a press.
+
 ## Target offset
 
 `arm_safety_distance_{x,y,z}` defaults to zero metres and translates each target along its local axes. Shared target conversion applies it once to the initial action pose and every streamed update before drift checks and planning.

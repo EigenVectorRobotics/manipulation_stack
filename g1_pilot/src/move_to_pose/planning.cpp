@@ -231,7 +231,7 @@ Eigen::MatrixXd MoveToPoseServer::replan_target_()
         planned_source_ = source;
         planned_source_frame_ = update.header.frame_id;
         if (get_parameter("final_leg_stepping").as_bool()) {
-            start_stepping_(state_, target);
+            start_stepping_(target);
             return {};
         }
         RCLCPP_INFO(get_logger(), "Refreshing the final leg against the latest target");
@@ -257,10 +257,16 @@ Eigen::MatrixXd MoveToPoseServer::replan_target_()
     return {};
 }
 
-void MoveToPoseServer::start_stepping_(const JointState & state, const Eigen::MatrixXd & target)
+void MoveToPoseServer::start_stepping_(const Eigen::MatrixXd & target)
 {
-    // The goal is frozen in the foot frame, which stays put while the pelvis leans with the reaching arm.
-    goal_in_anchor_ = pelvis_from_anchor_(state).inverse() * Eigen::Matrix4d(target);
+    // The goal is frozen in the anchor frame, which stays put while the pelvis leans with the reaching arm.
+    try {
+        goal_in_anchor_ = pelvis_from_anchor_().inverse() * Eigen::Matrix4d(target);
+        goal_in_anchor_valid_ = true;
+    } catch (const tf2::TransformException & ex) {
+        goal_in_anchor_valid_ = false;
+        RCLCPP_ERROR(get_logger(), "No final-leg anchor frame in TF: %s", ex.what());
+    }
     stepping_offset_ = safety_offset_();
     leg_steps_ = static_cast<int>(get_parameter("final_leg_steps").as_int());
     hold_since_ = get_clock()->now();
@@ -285,14 +291,16 @@ void MoveToPoseServer::step_final_leg_(const std::shared_ptr<GoalHandle> & goal)
 
     // (2) Re-map the frozen goal into the current pelvis; a last pass repeats the goal step, then holds and retreats.
     // The frozen goal carries the safety offset of the stepping start; an offset set since then moves it in the target frame
-    Eigen::Matrix4d target = pelvis_from_anchor_(start) * goal_in_anchor_;
-    target.block<3, 1>(0, 3) += target.block<3, 3>(0, 0) * (safety_offset_() - stepping_offset_);
-    target.block<3, 1>(0, 3) -= gripper_estimate_error_(goal->get_goal()->left_arm, target.block<3, 3>(0, 0));
     const std::size_t n = static_cast<std::size_t>(leg_steps_);
     const bool last = leg_step_ >= n;
     const std::size_t step = std::min(leg_step_, n - 1);
+    Eigen::Matrix4d target;
     Plan plan;
     try {
+        if (!goal_in_anchor_valid_) throw std::runtime_error("the anchor frame was not in TF when the leg started");
+        target = pelvis_from_anchor_() * goal_in_anchor_;
+        target.block<3, 1>(0, 3) += target.block<3, 3>(0, 0) * (safety_offset_() - stepping_offset_);
+        target.block<3, 1>(0, 3) -= gripper_estimate_error_(goal->get_goal()->left_arm, target.block<3, 3>(0, 0));
         planner_->setLeftArm(goal->get_goal()->left_arm);
         const double dt = get_parameter("plan_time_step").as_double();
         const double velocity = get_parameter("max_joint_vel").as_double();
@@ -358,9 +366,13 @@ Eigen::Vector3d MoveToPoseServer::safety_offset_()
             get_parameter("arm_safety_distance_z").as_double()};
 }
 
-Eigen::Matrix4d MoveToPoseServer::pelvis_from_anchor_(const JointState & state)
+Eigen::Matrix4d MoveToPoseServer::pelvis_from_anchor_()
 {
-    return planner_->frame_transform(state, "pelvis", get_parameter("final_leg_anchor_frame").as_string());
+    // From TF, so the anchor can be the body EKF's foot_world; leg kinematics drift as the body leans
+    const auto transform = tf_buffer_->lookupTransform(
+        "pelvis", get_parameter("final_leg_anchor_frame").as_string(), tf2::TimePointZero,
+        tf2::durationFromSec(get_parameter("tf_timeout").as_double()));
+    return tf2::transformToEigen(transform).matrix();
 }
 
 void MoveToPoseServer::monitor_(const std::shared_ptr<GoalHandle> & goal)

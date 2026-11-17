@@ -83,11 +83,11 @@ private:
     Plan to_plan_(const HumanoidPilot::JointTrajectory & planned, bool left);
     void try_replan_(const std::shared_ptr<GoalHandle> & goal);
     Eigen::MatrixXd replan_target_();
-    void start_stepping_(const JointState & state, const Eigen::MatrixXd & target);
+    void start_stepping_(const Eigen::MatrixXd & target);
     Eigen::Vector3d safety_offset_();
     Eigen::Vector3d gripper_estimate_error_(bool left, const Eigen::Matrix3d & target_rotation);
     void step_final_leg_(const std::shared_ptr<GoalHandle> & goal);
-    Eigen::Matrix4d pelvis_from_anchor_(const JointState & state);
+    Eigen::Matrix4d pelvis_from_anchor_();
     Eigen::MatrixXd to_pelvis_frame_(const PoseStamped & pose);
     Eigen::MatrixXd pelvis_to_planning_frame_();
     void publish_path_(const std::vector<Eigen::MatrixXd> & pelvis_path);
@@ -155,11 +155,12 @@ private:
     bool release_after_brake_ = false;  // a failed goal stops commanding once its brake ends
     rclcpp::Time hold_since_;
 
-    // Final-leg stepping (worker only): the goal frozen in the foot frame, re-mapped into the pelvis before every step
+    // Final-leg stepping (worker only): the goal frozen in the anchor frame, re-mapped into the pelvis before every step
     bool stepping_ = false;
     std::size_t leg_step_ = 0;
     int leg_steps_ = 0;
     Eigen::Matrix4d goal_in_anchor_ = Eigen::Matrix4d::Identity();
+    bool goal_in_anchor_valid_ = false;
     Eigen::Vector3d stepping_offset_ = Eigen::Vector3d::Zero();
 
     // target_mutex_ protects the target stream independently of control and goals.
