@@ -328,34 +328,58 @@ void MoveToPoseServer::step_final_leg_(const std::shared_ptr<GoalHandle> & goal)
     leg_step_ = last ? 0 : leg_step_ + 1;
 }
 
+void MoveToPoseServer::record_gripper_estimates_()
+{
+    // The error is taken at the fit's own stamp, so arm motion between the fit and its use does not bias it
+    for (const bool left : {false, true}) {
+        const std::string base = std::string(left ? "left" : "right") + "_dex1_base_link";
+        geometry_msgs::msg::TransformStamped estimate, encoder;
+        double stamp = 0.0;
+        try {
+            if (!tf_buffer_->canTransform("pelvis", base + "_estimate", tf2::TimePointZero)) continue;
+            estimate = tf_buffer_->lookupTransform("pelvis", base + "_estimate", tf2::TimePointZero);
+            stamp = rclcpp::Time(estimate.header.stamp).seconds();
+            if (stamp <= gripper_estimate_seen_[left]) continue;
+            if (!tf_buffer_->canTransform("pelvis", base, rclcpp::Time(estimate.header.stamp))) continue;
+            encoder = tf_buffer_->lookupTransform("pelvis", base, rclcpp::Time(estimate.header.stamp));
+        } catch (const tf2::TransformException &) {
+            continue;
+        }
+        gripper_estimate_seen_[left] = stamp;
+        const auto & e = estimate.transform.translation;
+        const auto & k = encoder.transform.translation;
+        const Eigen::Vector3d error(e.x - k.x, e.y - k.y, e.z - k.z);
+        if (error.norm() > get_parameter("gripper_estimate_max_error").as_double()) {
+            RCLCPP_WARN(get_logger(), "Ignoring %s gripper estimate: error %.1f mm",
+                        left ? "left" : "right", error.norm() * 1e3);
+            continue;
+        }
+        std::lock_guard<std::mutex> lock(estimate_mutex_);
+        gripper_errors_[left].add(stamp, error);
+    }
+}
+
 Eigen::Vector3d MoveToPoseServer::gripper_estimate_error_(bool left, const Eigen::Matrix3d & target_rotation)
 {
-    // Depth-fitted minus encoder gripper position in the pelvis; zero when disabled, stale or implausible
+    // Depth-fitted minus encoder gripper position in the pelvis; zero when disabled or no fit is recent enough
     constexpr double LEAD_TOWARD_GOAL = -0.008;  // m along the target's x: the planner sees the gripper this much short of the goal, so the press goes this much deeper
     if (!get_parameter("use_gripper_estimate").as_bool()) return Eigen::Vector3d::Zero();
-    const std::string base = std::string(left ? "left" : "right") + "_dex1_base_link";
-    geometry_msgs::msg::TransformStamped estimate, encoder;
-    try {
-        estimate = tf_buffer_->lookupTransform("pelvis", base + "_estimate", tf2::TimePointZero);
-        encoder = tf_buffer_->lookupTransform("pelvis", base, rclcpp::Time(estimate.header.stamp),
-                                              rclcpp::Duration::from_seconds(0.05));
-    } catch (const tf2::TransformException & ex) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "No gripper estimate: %s", ex.what());
+    GripperErrorHistory::Correction c;
+    {
+        std::lock_guard<std::mutex> lock(estimate_mutex_);
+        c = gripper_errors_[left].correction(get_clock()->now().seconds(),
+                                            get_parameter("gripper_estimate_max_age").as_double(),
+                                            get_parameter("gripper_estimate_hold_time").as_double());
+    }
+    if (c.fits == 0) {
+        RCLCPP_WARN(get_logger(), "No gripper estimate (newest fit %.1f s old); stepping uncorrected", c.newest_age);
         return Eigen::Vector3d::Zero();
     }
-    const double age = (get_clock()->now() - rclcpp::Time(estimate.header.stamp)).seconds();
-    const auto & e = estimate.transform.translation;
-    const auto & k = encoder.transform.translation;
-    Eigen::Vector3d error(e.x - k.x, e.y - k.y, e.z - k.z);
-    if (age > get_parameter("gripper_estimate_max_age").as_double() ||
-        error.norm() > get_parameter("gripper_estimate_max_error").as_double()) {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-            "Ignoring gripper estimate: age %.2f s, error %.1f mm", age, error.norm() * 1e3);
-        return Eigen::Vector3d::Zero();
-    }
-    error += target_rotation.col(0) * LEAD_TOWARD_GOAL;
-    RCLCPP_INFO(get_logger(), "Gripper estimate error [%.1f %.1f %.1f] mm in pelvis",
-                error(0) * 1e3, error(1) * 1e3, error(2) * 1e3);
+    Eigen::Vector3d error = c.error + target_rotation.col(0) * LEAD_TOWARD_GOAL;
+    RCLCPP_INFO(get_logger(), "Gripper estimate error [%.1f %.1f %.1f] mm in pelvis from %s %zu fit(s), newest %.1f s old",
+                error(0) * 1e3, error(1) * 1e3, error(2) * 1e3,
+                c.newest_age <= get_parameter("gripper_estimate_max_age").as_double() ? "fresh" : "held median of",
+                c.fits, c.newest_age);
     return error;
 }
 

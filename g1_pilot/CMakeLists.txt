@@ -108,6 +108,10 @@ if(BUILD_TESTING)
         G1_ASSET_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../g1_description/assets/g1/"
         G1_CONFIG_FILE="${CMAKE_CURRENT_SOURCE_DIR}/config/g1.yaml")
 
+    add_executable(test_gripper_error_history test/move_to_pose/test_gripper_error_history.cpp)
+    target_include_directories(test_gripper_error_history PRIVATE src)
+    target_link_libraries(test_gripper_error_history PRIVATE g1_pilot GTest::gtest_main)
+
     add_executable(body_ekf_replay test/body_ekf/replay_body_ekf.cpp)
     target_include_directories(body_ekf_replay PRIVATE src)
     target_link_libraries(body_ekf_replay PRIVATE g1_pilot)
@@ -126,6 +130,7 @@ if(BUILD_TESTING)
         # gtest_discover_tests(line_unittest WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)
         gtest_discover_tests(test_mp_ik WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/test)
         gtest_discover_tests(test_body_ekf)
+        gtest_discover_tests(test_gripper_error_history)
     endif()
 
 

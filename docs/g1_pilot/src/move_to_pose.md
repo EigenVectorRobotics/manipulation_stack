@@ -32,3 +32,7 @@ The final leg freezes its goal in `final_leg_anchor_frame`, read from TF before 
 ## Target offset
 
 `arm_safety_distance_{x,y,z}` defaults to zero metres and translates each target along its local axes. Shared target conversion applies it once to the initial action pose and every streamed update before drift checks and planning.
+
+## Gripper estimate
+
+A 20 Hz timer records each depth fit of the gripper as its offset from the encoder pose, taken at the fit's own stamp. Each final-leg step uses a fresh fit, or else the per-axis median of fits within `gripper_estimate_hold_time`, since the camera loses the gripper near the panel.

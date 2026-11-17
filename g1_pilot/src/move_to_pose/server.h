@@ -1,6 +1,8 @@
 #ifndef G1_PILOT_MOVE_TO_POSE_SERVER_H
 #define G1_PILOT_MOVE_TO_POSE_SERVER_H
 
+#include "gripper_error_history.h"
+
 #include <g1_pilot/g1_pilot.h>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <humanoid_manipulation_interfaces/action/move_to_pose.hpp>
@@ -85,6 +87,7 @@ private:
     Eigen::MatrixXd replan_target_();
     void start_stepping_(const Eigen::MatrixXd & target);
     Eigen::Vector3d safety_offset_();
+    void record_gripper_estimates_();
     Eigen::Vector3d gripper_estimate_error_(bool left, const Eigen::Matrix3d & target_rotation);
     void step_final_leg_(const std::shared_ptr<GoalHandle> & goal);
     Eigen::Matrix4d pelvis_from_anchor_();
@@ -132,6 +135,8 @@ private:
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
     std::shared_ptr<tf2_ros::StaticTransformBroadcaster> ee_broadcaster_;
+    rclcpp::CallbackGroup::SharedPtr estimate_group_;
+    rclcpp::TimerBase::SharedPtr estimate_timer_;
 
     // ctrl_mutex_ protects feedback and every trajectory transition.
     std::mutex ctrl_mutex_;
@@ -170,6 +175,11 @@ private:
     PoseStamped live_target_;
     bool have_live_target_ = false;
     uint64_t live_target_count_ = 0;
+
+    // estimate_mutex_ protects the accepted depth-fit errors, indexed right then left; fits are sparse near the panel
+    std::mutex estimate_mutex_;
+    GripperErrorHistory gripper_errors_[2];
+    double gripper_estimate_seen_[2] = {0.0, 0.0};
 
     // goal_mutex_ protects ownership; planning runs without either goal or control lock.
     std::mutex goal_mutex_;
