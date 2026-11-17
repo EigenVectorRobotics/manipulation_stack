@@ -17,6 +17,8 @@ def generate_launch_description():
     ld.add_action(DeclareLaunchArgument('check_reach_service', default_value='/check_reach'))
     ld.add_action(DeclareLaunchArgument('planning_frame',
                                         default_value='left_ankle_roll_link'))
+    # The body EKF's frame, the one the visual servo target lives in; it holds still while the body leans into the press
+    ld.add_action(DeclareLaunchArgument('final_leg_anchor_frame', default_value='foot_world'))
     for axis in 'xyz':
         ld.add_action(DeclareLaunchArgument(f'arm_safety_distance_{axis}', default_value='0.0'))
 
@@ -32,6 +34,7 @@ def generate_launch_description():
             'position_control_topic': LaunchConfiguration('position_control_topic'),
             'traj_topic': LaunchConfiguration('traj_topic'),
             'planning_frame': LaunchConfiguration('planning_frame'),
+            'final_leg_anchor_frame': LaunchConfiguration('final_leg_anchor_frame'),
             **{f'arm_safety_distance_{axis}': LaunchConfiguration(f'arm_safety_distance_{axis}')
                for axis in 'xyz'},
         }],
