@@ -27,6 +27,9 @@ MoveToPoseServer::MoveToPoseServer() : Node("move_to_pose_server")
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::duration<double>(control_period_)),
         std::bind(&MoveToPoseServer::control_tick_, this));
+    estimate_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    estimate_timer_ = create_wall_timer(50ms, std::bind(&MoveToPoseServer::record_gripper_estimates_, this),
+                                        estimate_group_);
 }
 
 MoveToPoseServer::~MoveToPoseServer()
@@ -80,6 +83,7 @@ void MoveToPoseServer::declare_parameters_()
     declare_parameter<double>("max_tracking_error", 0.2);
     declare_parameter<double>("tracking_error_timeout", 1.0);
     declare_parameter<double>("near_target_distance", 0.02);
+    declare_parameter<double>("gripper_estimate_hold_time", 60.0);
     frame_ = get_parameter("planning_frame").as_string();
     control_period_ = get_parameter("control_period").as_double();
 }
