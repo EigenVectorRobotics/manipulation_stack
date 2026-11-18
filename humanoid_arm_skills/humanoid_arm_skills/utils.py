@@ -90,6 +90,40 @@ def quaternion_matrix(quaternion: np.ndarray) -> np.ndarray:
         [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)]])
 
 
+def matrix_quaternion(rotation: np.ndarray) -> np.ndarray:
+    """Quaternion [x, y, z, w] of a rotation matrix."""
+    # The branch with the largest pivot, so near 180 deg nothing divides by a tiny w
+    if np.trace(rotation) > 0.0:
+        w = np.sqrt(1.0 + np.trace(rotation)) / 2.0
+        x = (rotation[2, 1] - rotation[1, 2]) / (4.0 * w)
+        y = (rotation[0, 2] - rotation[2, 0]) / (4.0 * w)
+        z = (rotation[1, 0] - rotation[0, 1]) / (4.0 * w)
+        return np.array([x, y, z, w]) / np.linalg.norm([x, y, z, w])
+    k = int(np.argmax(np.diag(rotation)))
+    i, j = (k + 1) % 3, (k + 2) % 3
+    q = np.zeros(4)
+    q[k] = np.sqrt(max(0.0, 1.0 + rotation[k, k] - rotation[i, i] - rotation[j, j])) / 2.0
+    q[i] = (rotation[i, k] + rotation[k, i]) / (4.0 * q[k])
+    q[j] = (rotation[j, k] + rotation[k, j]) / (4.0 * q[k])
+    q[3] = (rotation[j, i] - rotation[i, j]) / (4.0 * q[k])
+    return q / np.linalg.norm(q)
+
+
+def matrix_rpy(rotation: np.ndarray) -> np.ndarray:
+    """Roll, pitch and yaw [rad] of a rotation matrix, as fixed-axis x, y, z rotations."""
+    return np.array([np.arctan2(rotation[2, 1], rotation[2, 2]),
+                     np.arcsin(np.clip(-rotation[2, 0], -1.0, 1.0)),
+                     np.arctan2(rotation[1, 0], rotation[0, 0])])
+
+
+def rpy_matrix(rpy: np.ndarray) -> np.ndarray:
+    """Rotation matrix of roll, pitch and yaw [rad], the inverse of matrix_rpy."""
+    (cr, cp, cy), (sr, sp, sy) = np.cos(rpy), np.sin(rpy)
+    return np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                     [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                     [-sp, cp * sr, cp * cr]])
+
+
 def align_surface_z(quaternion: np.ndarray) -> np.ndarray:
     """Preserve local X and align local Z closest to the reference frame's +Z."""
     return normal_quaternion(surface_normal(quaternion))
