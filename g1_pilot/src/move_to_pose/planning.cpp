@@ -332,16 +332,16 @@ void MoveToPoseServer::record_gripper_estimates_()
 {
     // The error is taken at the fit's own stamp, so arm motion between the fit and its use does not bias it
     for (const bool left : {false, true}) {
-        const std::string base = std::string(left ? "left" : "right") + "_dex1_base_link";
+        const std::string tip = std::string(left ? "left" : "right") + "_ee";
         geometry_msgs::msg::TransformStamped estimate, encoder;
         double stamp = 0.0;
         try {
-            if (!tf_buffer_->canTransform("pelvis", base + "_estimate", tf2::TimePointZero)) continue;
-            estimate = tf_buffer_->lookupTransform("pelvis", base + "_estimate", tf2::TimePointZero);
+            if (!tf_buffer_->canTransform("pelvis", tip + "_estimate", tf2::TimePointZero)) continue;
+            estimate = tf_buffer_->lookupTransform("pelvis", tip + "_estimate", tf2::TimePointZero);
             stamp = rclcpp::Time(estimate.header.stamp).seconds();
             if (stamp <= gripper_estimate_seen_[left]) continue;
-            if (!tf_buffer_->canTransform("pelvis", base, rclcpp::Time(estimate.header.stamp))) continue;
-            encoder = tf_buffer_->lookupTransform("pelvis", base, rclcpp::Time(estimate.header.stamp));
+            if (!tf_buffer_->canTransform("pelvis", tip, rclcpp::Time(estimate.header.stamp))) continue;
+            encoder = tf_buffer_->lookupTransform("pelvis", tip, rclcpp::Time(estimate.header.stamp));
         } catch (const tf2::TransformException &) {
             continue;
         }
