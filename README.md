@@ -24,6 +24,19 @@ You don't need a robot to use this library.
 
 You can learn about this package in depth [here](docs/docs.md)
 
+
+## Documentation
+
+The site is at https://eigenvectorrobotics.github.io/manipulation_stack/. Every page below also reads on GitHub.
+
+- [System](docs/design/system.md): machines, packages and the ROS interface table.
+- [Classes and ownership](docs/design/classes.md): the C++ classes, who owns what, and the Python nodes.
+- [Sequences](docs/design/sequences.md): startup, a press goal, the reach check and the press offset.
+- [Press pipeline](docs/design/pipeline.md): the target filter, seeding, trajectory shape and control modes.
+- [Launch files](docs/design/launch.md): what each launch file includes and starts.
+- [Technical reference](docs/docs.md), [Move-to-pose node](docs/g1_pilot/src/move_to_pose.md), [Body attitude EKF](docs/g1_pilot/src/core/body_ekf.md).
+- Code map: [g1_pilot](docs/code/g1_pilot.md), [humanoid_arm_skills](docs/code/humanoid_arm_skills.md), [humanoid_manipulation_interfaces](docs/code/humanoid_manipulation_interfaces.md), [g1_description](docs/code/g1_description.md).
+
 # Installation
 
 ## Building with ROS2

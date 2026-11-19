@@ -1,0 +1,99 @@
+site_name: Manipulation stack
+site_description: Arm IK, planning, control and the press skill for the Unitree G1
+site_url: https://eigenvectorrobotics.github.io/manipulation_stack/
+repo_url: https://github.com/EigenVectorRobotics/manipulation_stack
+repo_name: EigenVectorRobotics/manipulation_stack
+edit_uri: ''
+docs_dir: docs
+strict: true
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: '(prefers-color-scheme: light)'
+      scheme: default
+      primary: teal
+      toggle: {icon: material/weather-night, name: Dark mode}
+    - media: '(prefers-color-scheme: dark)'
+      scheme: slate
+      primary: teal
+      toggle: {icon: material/weather-sunny, name: Light mode}
+
+hooks:
+  - docs/tools/hooks.py
+
+extra:
+  api_roots: [humanoid_arm_skills]
+
+markdown_extensions:
+  - admonition
+  - tables
+  - attr_list
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify {kwds: {case: lower}}
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [humanoid_arm_skills]
+          options:
+            show_root_heading: true
+            show_root_full_path: true
+            show_bases: true
+            show_source: true
+            members_order: source
+            filters: ['!^_']
+            separate_signature: true
+            show_signature_annotations: true
+            docstring_style: google
+            heading_level: 2
+
+validation:
+  links:
+    absolute_links: info
+    unrecognized_links: warn
+    anchors: warn
+
+nav:
+  - Home: README.md
+  - Eigen Vector docs: https://eigenvectorrobotics.github.io/eigen_vector/
+  - Architecture:
+      - System: docs/design/system.md
+      - Classes and ownership: docs/design/classes.md
+      - Sequences: docs/design/sequences.md
+      - Press pipeline: docs/design/pipeline.md
+      - Launch files: docs/design/launch.md
+  - Guides:
+      - Technical reference: docs/docs.md
+      - Move-to-pose node: docs/g1_pilot/src/move_to_pose.md
+      - Body attitude EKF: docs/g1_pilot/src/core/body_ekf.md
+      - arm_ik library: g1_pilot/src/core/arm_ik/README.md
+  - Packages:
+      - g1_pilot: docs/code/g1_pilot.md
+      - humanoid_arm_skills: docs/code/humanoid_arm_skills.md
+      - humanoid_manipulation_interfaces: docs/code/humanoid_manipulation_interfaces.md
+      - g1_description: docs/code/g1_description.md
+  - Code map:
+      - g1_pilot/src/core: docs/code/g1_pilot/core.md
+      - g1_pilot/src/core/arm_ik: docs/code/g1_pilot/core/arm_ik.md
+      - g1_pilot/src/core/arm_control: docs/code/g1_pilot/core/arm_control.md
+      - g1_pilot/src/core/arm_mp: docs/code/g1_pilot/core/arm_mp.md
+      - g1_pilot/src/core/body_ekf: docs/code/g1_pilot/core/body_ekf.md
+      - g1_pilot/src/move_to_pose: docs/code/g1_pilot/move_to_pose.md
+      - g1_pilot/test: docs/code/g1_pilot/test.md
