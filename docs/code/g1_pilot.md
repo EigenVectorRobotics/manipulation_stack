@@ -14,6 +14,6 @@ The C++ arm library `libg1_pilot` and its ROS 2 nodes. The library builds withou
 - **`src/joint_traj_publisher.cpp`, `src/joint_state_publisher.cpp`**: Planning and IK demos that publish on `position_control`.
 - **`src/helper_funcs.h`**: Conversions between Eigen, trajectories, paths and poses, workspace limits, and the `left_ee`/`right_ee` static TF.
 - **`config/g1.yaml`**: Locked joints, end-effector frames, joint limit overrides, joint dynamics and the collision margin.
-- **`config/body_ekf_stanley.yaml`**: Per-robot `body_ekf` parameters; the node does not read `camera_imu_topic`, `tf_root_frame`, `publish_tf` or `use_header_stamps`.
+- **`config/body_ekf_stanley.yaml`**: Per-robot `body_ekf` parameters for Stanley.
 - **`launch/`**: Eleven launch files; see [Launch files](../design/launch.md).
 - **`test/`**: GTest suites, benchmarks and replay tools. See [test](g1_pilot/test.md).

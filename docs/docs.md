@@ -446,7 +446,7 @@ Goal cooldown is `goal_cooldown` (default 1 s). The 20 Hz control loop advances 
 
 Planning calls `setLeftArm` before `planTrajectory`; without it the planner silently plans for the right arm regardless of which goal topic fired.
 
-The default `visual_servo.launch.py` remaps `<goal_pose_topic>/right` → `/track3d/selected_normal_pose_filtered_upright` to plug into the perception stack.
+The default `visual_servo.launch.py` remaps `<goal_pose_topic>/right` → `/track_3d/selected_normal_pose_filtered/arm_upright` to plug into the perception stack.
 
 ### `impede_arms` — Impedance control
 
@@ -481,7 +481,7 @@ Publishes IK solutions at 10 Hz for a fixed sinusoidal target. Useful for verify
 |-------------|-----------|
 | `controller.launch.py` | `joint_controller` (ControlJointTrajectory action server). Optional `display.launch.py` via `PublishTF`. |
 | `plan_trajectory.launch.py` | `plan_trajecory` (PlanJointTrajectory service). |
-| `visual_servo.launch.py` | `visual_servo`, with right goal topic remapped to `/track3d/selected_normal_pose_filtered_upright`. |
+| `visual_servo.launch.py` | `visual_servo`, with right goal topic remapped to `/track_3d/selected_normal_pose_filtered/arm_upright`. |
 | `visual_servo_aruco.launch.py` | `visual_servo` + RealSense + ArUco detector (requires `realsense2_camera`, `hand_eye_calibration`). |
 | `ik_demo.launch.py` | `ik_joint_state_publisher`. |
 | `grav_ff.launch.py` | `grav_ff`. |
@@ -798,7 +798,7 @@ Then call the planner and send the trajectory through the controller — see `hu
 ros2 launch g1_pilot visual_servo.launch.py
 ```
 
-Send goals on `/arm/goal_pose/left` and `/arm/goal_pose/right` (or pipe perception into the remapped `/track3d/selected_normal_pose_filtered_upright`):
+Send goals on `/arm/goal_pose/left` and `/arm/goal_pose/right` (or pipe perception into the remapped `/track_3d/selected_normal_pose_filtered/arm_upright`):
 
 ```bash
 ros2 topic pub --once /arm/goal_pose/right geometry_msgs/msg/PoseStamped \

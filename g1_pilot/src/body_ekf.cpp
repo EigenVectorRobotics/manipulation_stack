@@ -53,6 +53,7 @@ public:
         string_param(fixed_frame_, "fixed_frame", "foot_world");
         string_param(camera_link_frame_, "camera_link_frame", "camera_link");
         string_param(camera_imu_frame_, "camera_imu_frame", "camera_imu_optical_frame");
+        string_param(camera_imu_topic_, "camera_imu_topic", "/camera/camera/imu");
         string_param(pelvis_imu_topic_, "pelvis_imu_topic", "/pelvis_imu");
         string_param(torso_imu_topic_, "torso_imu_topic", "/torso_imu");
         string_param(torso_pose_topic_, "torso_pose_topic", "/body_ekf/torso_pose");
@@ -79,7 +80,7 @@ public:
         // (4) Camera IMU after its TF resolves, or the torso gyro alone right away.
         const std::string robot_name = this->declare_parameter<std::string>("robot_name", "unknown");
         if (params_.use_camera_imu) {
-            camera_imu_sub_ = imu_subscription_(camera_imu_frame_, Body::Camera);
+            camera_imu_sub_ = imu_subscription_(camera_imu_topic_, Body::Camera);
             camera_timer_ = this->create_wall_timer(500ms, std::bind(&BodyEKFNode::resolve_camera_frames_, this));
             RCLCPP_INFO(this->get_logger(), "body_ekf (%s): waiting for camera TF, then a still period",
                         robot_name.c_str());
@@ -102,6 +103,7 @@ private:
     std::string fixed_frame_;
     std::string camera_link_frame_;
     std::string camera_imu_frame_;
+    std::string camera_imu_topic_;
     int64_t tf_decimation_ = 1;
     int64_t pose_decimation_ = 4;
     int64_t grid_count_ = 0;

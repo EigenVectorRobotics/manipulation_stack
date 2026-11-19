@@ -96,4 +96,4 @@ flowchart LR
   BE["body_ekf.launch.py"] --> BEN["body_ekf"]
 ```
 
-`visual_servo.launch.py` remaps the right-arm goal topic to `/track3d/selected_normal_pose_filtered_upright`. That name differs from the `track_3d` topics the press stack uses.
+`visual_servo.launch.py` remaps the right-arm goal topic to `/track_3d/selected_normal_pose_filtered/arm_upright`, the filtered pose the press stack uses.
