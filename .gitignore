@@ -13,3 +13,4 @@ build
 .vscode
 **/*cache*
 site/
+_site_src/

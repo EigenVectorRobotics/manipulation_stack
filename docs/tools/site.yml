@@ -1,0 +1,34 @@
+title: Manipulation stack
+description: Arm IK, planning, control and the press skill for the Unitree G1
+repo_url: https://github.com/EigenVectorRobotics/manipulation_stack
+links:
+- title: Eigen Vector docs
+  url: https://eigenvectorrobotics.github.io/eigen_vector/
+api_roots:
+- humanoid_arm_skills
+nav:
+- Home: README.md
+- Architecture:
+  - System: docs/design/system.md
+  - Classes and ownership: docs/design/classes.md
+  - Sequences: docs/design/sequences.md
+  - Press pipeline: docs/design/pipeline.md
+  - Launch files: docs/design/launch.md
+- Guides:
+  - Technical reference: docs/docs.md
+  - Move-to-pose node: docs/g1_pilot/src/move_to_pose.md
+  - Body attitude EKF: docs/g1_pilot/src/core/body_ekf.md
+  - arm_ik library: g1_pilot/src/core/arm_ik/README.md
+- Packages:
+  - g1_pilot: docs/code/g1_pilot.md
+  - humanoid_arm_skills: docs/code/humanoid_arm_skills.md
+  - humanoid_manipulation_interfaces: docs/code/humanoid_manipulation_interfaces.md
+  - g1_description: docs/code/g1_description.md
+- Code map:
+  - g1_pilot/src/core: docs/code/g1_pilot/core.md
+  - g1_pilot/src/core/arm_ik: docs/code/g1_pilot/core/arm_ik.md
+  - g1_pilot/src/core/arm_control: docs/code/g1_pilot/core/arm_control.md
+  - g1_pilot/src/core/arm_mp: docs/code/g1_pilot/core/arm_mp.md
+  - g1_pilot/src/core/body_ekf: docs/code/g1_pilot/core/body_ekf.md
+  - g1_pilot/src/move_to_pose: docs/code/g1_pilot/move_to_pose.md
+  - g1_pilot/test: docs/code/g1_pilot/test.md
