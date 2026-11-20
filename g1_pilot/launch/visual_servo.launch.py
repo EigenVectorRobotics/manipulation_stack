@@ -45,7 +45,7 @@ def generate_launch_description():
             'goal_cooldown': LaunchConfiguration('goal_cooldown'),
         }],
         remappings=[
-            (PythonExpression(["'/", LaunchConfiguration('goal_pose_topic'), "/right'"]), '/track3d/selected_normal_pose_filtered_upright')
+            (PythonExpression(["'/", LaunchConfiguration('goal_pose_topic'), "/right'"]), '/track_3d/selected_normal_pose_filtered/arm_upright')
         ]
     ))
     return ld

@@ -11,7 +11,7 @@ def generate_launch_description():
     package_name = 'g1_pilot'
     package_path = FindPackageShare(package_name)
 
-    ld.add_action(DeclareLaunchArgument('robot', default_value='stanley', description='stanley or patricia'))
+    ld.add_action(DeclareLaunchArgument('robot', default_value='stanley', description='robot name: loads config/body_ekf_<robot>.yaml'))
     ld.add_action(DeclareLaunchArgument('use_sim_time', default_value='false'))
 
     config_file = PathJoinSubstitution([package_path, 'config', ['body_ekf_', LaunchConfiguration('robot'), '.yaml']])

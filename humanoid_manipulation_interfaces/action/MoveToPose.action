@@ -3,7 +3,9 @@ geometry_msgs/PoseStamped target_pose
 bool left_arm
 # Optional topic publishing updated target poses as the goal moves, for a
 # target that is being tracked rather than fixed. Empty means a static target.
-# Poses arriving here are currently stored only: nothing replans off them yet.
+# A pose replans the arm when it moves past replan_position_delta (m) or
+# replan_orientation_delta (rad) from the planned target, at most once per
+# replan_min_interval (s).
 string target_topic
 ---
 # Result

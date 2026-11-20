@@ -8,12 +8,9 @@ body_ekf:
     torso_imu_topic: /torso_imu
     camera_imu_topic: /camera/camera/imu
     use_camera_imu: false          # true: blend the camera gyro and fuse its gravity (needs the camera TF)
-    use_header_stamps: true
 
-    # Outputs: TF fixed_frame -> tf_root_frame (root of the live robot TF tree) and the torso pose
+    # Outputs: TF torso_link -> fixed_frame, so the gravity-aligned frame hangs off the live robot TF tree, and the torso pose
     fixed_frame: foot_world
-    tf_root_frame: sensor
-    publish_tf: true
     tf_decimation: 1               # 1: every 200 Hz grid step
     torso_pose_topic: /body_ekf/torso_pose
     pose_publish_decimation: 4
