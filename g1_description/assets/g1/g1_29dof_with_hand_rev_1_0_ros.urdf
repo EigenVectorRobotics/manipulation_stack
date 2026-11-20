@@ -568,7 +568,7 @@
   <link name="camera_link"></link>
   <joint name="d435_joint" type="fixed">
     <!-- better for button pressing V -->
-     <origin xyz="0.069324 0.025550 0.419894" rpy="-0.005696 0.320641 -0.027792"/>
+     <origin xyz="0.068963 0.023804 0.418953" rpy="-0.005696 0.320641 -0.027792"/>
     <parent link="torso_link"/>
     <child link="camera_link"/>
   </joint>
