@@ -51,6 +51,7 @@ void MoveToPoseServer::declare_parameters_()
     declare_parameter<std::string>("feedback_topic", "feedback");
     declare_parameter<std::string>("position_control_topic", "position_control");
     declare_parameter<std::string>("traj_topic", "traj");
+    declare_parameter<std::string>("planning_target_topic", "~/planning_target");
     declare_parameter<std::string>("action_name", "move_to_pose");
     declare_parameter<std::string>("planning_frame", "pelvis");
 
@@ -103,6 +104,7 @@ void MoveToPoseServer::create_publishers_()
 {
     command_pub_ = create_publisher<JointStateMsg>(get_parameter("position_control_topic").as_string(), 10);
     path_pub_ = create_publisher<Path>(get_parameter("traj_topic").as_string(), 10);
+    target_pub_ = create_publisher<PoseStamped>(get_parameter("planning_target_topic").as_string(), 10);
 
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);

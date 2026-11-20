@@ -94,6 +94,7 @@ private:
     Eigen::MatrixXd to_pelvis_frame_(const PoseStamped & pose);
     Eigen::MatrixXd pelvis_to_planning_frame_();
     void publish_path_(const std::vector<Eigen::MatrixXd> & pelvis_path);
+    void publish_target_(const Eigen::MatrixXd & pelvis_target);
 
     // Trajectory execution: control.cpp. Helpers ending in _locked_ require ctrl_mutex_.
     GoalStatus install_(const std::shared_ptr<GoalHandle> & goal,
@@ -128,6 +129,7 @@ private:
 
     rclcpp::Publisher<JointStateMsg>::SharedPtr command_pub_;
     rclcpp::Publisher<Path>::SharedPtr path_pub_;
+    rclcpp::Publisher<PoseStamped>::SharedPtr target_pub_;
     rclcpp::Subscription<JointStateMsg>::SharedPtr feedback_sub_;
     rclcpp::TimerBase::SharedPtr control_timer_;
     rclcpp::CallbackGroup::SharedPtr cb_group_;

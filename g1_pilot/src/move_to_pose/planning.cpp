@@ -99,6 +99,7 @@ void MoveToPoseServer::run_(const std::shared_ptr<GoalHandle> & goal)
             ? "Cancelled while planning" : "Preempted by a newer goal");
         return;
     }
+    publish_target_(target);
     publish_path_(plan.path);
     RCLCPP_INFO(get_logger(), "Tracking trajectory");
     monitor_(goal);
@@ -192,6 +193,7 @@ void MoveToPoseServer::try_replan_(const std::shared_ptr<GoalHandle> & goal)
     if (install_(goal, plan.trajectory, target, plan.lock_time) != GoalStatus::Active) return;
     plan_failures_ = 0;
     publish_path_(plan.path);
+    publish_target_(target);
     RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
         "Replanned to [%.3f %.3f %.3f], %zu waypoints",
         target(0, 3), target(1, 3), target(2, 3), plan.trajectory.points.size());
@@ -323,6 +325,7 @@ void MoveToPoseServer::step_final_leg_(const std::shared_ptr<GoalHandle> & goal)
     if (install_(goal, plan.trajectory, target, -1.0) != GoalStatus::Active) return;
     plan_failures_ = 0;
     publish_path_(plan.path);
+    publish_target_(target);
     RCLCPP_INFO(get_logger(), "Final-leg step %zu/%zu to [%.3f %.3f %.3f]",
                 leg_step_, n, target(0, 3), target(1, 3), target(2, 3));
     leg_step_ = last ? 0 : leg_step_ + 1;
@@ -602,6 +605,23 @@ void MoveToPoseServer::publish_path_(const std::vector<Eigen::MatrixXd> & pelvis
     path.reserve(pelvis_path.size());
     for (const auto & pose : pelvis_path) path.push_back(transform * pose);
     path_pub_->publish(convertToPath(path, frame_, get_clock()->now()));
+}
+
+void MoveToPoseServer::publish_target_(const Eigen::MatrixXd & pelvis_target)
+{
+    // The target exactly as planned: in pelvis, after the safety offset and the gripper estimate correction
+    const Eigen::Quaterniond turn(Eigen::Matrix3d(pelvis_target.block<3, 3>(0, 0)));
+    PoseStamped message;
+    message.header.stamp = get_clock()->now();
+    message.header.frame_id = "pelvis";
+    message.pose.position.x = pelvis_target(0, 3);
+    message.pose.position.y = pelvis_target(1, 3);
+    message.pose.position.z = pelvis_target(2, 3);
+    message.pose.orientation.x = turn.x();
+    message.pose.orientation.y = turn.y();
+    message.pose.orientation.z = turn.z();
+    message.pose.orientation.w = turn.w();
+    target_pub_->publish(message);
 }
 
 } // namespace g1_pilot
