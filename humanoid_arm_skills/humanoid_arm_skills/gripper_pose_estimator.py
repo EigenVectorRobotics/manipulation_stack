@@ -53,6 +53,7 @@ class GripperPoseEstimator(Node):
 
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         self.static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+        self.static_tips = []         # every tip sent so far: each sendTransform replaces the latched message
         self.create_subscription(CameraInfo, self.get_parameter('camera_info_topic').value, self._camera_info_cb, 1)
         # A one-deep best-effort reader starves on large images under load; _depth_cb already keeps only the newest frame
         self.create_subscription(Image, self.get_parameter('depth_topic').value, self._depth_cb, qos_profile_sensor_data)
@@ -134,7 +135,8 @@ class GripperPoseEstimator(Node):
             return
         tip.header.frame_id = arm['estimate_frame']
         tip.child_frame_id = f"{arm['tip_frame']}_estimate"
-        self.static_broadcaster.sendTransform(tip)
+        self.static_tips.append(tip)
+        self.static_broadcaster.sendTransform(self.static_tips)
         arm['tip_published'] = True
 
 
