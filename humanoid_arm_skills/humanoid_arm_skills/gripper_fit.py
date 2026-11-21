@@ -5,6 +5,7 @@ import sys
 import kornia
 import numpy as np
 import nvdiffrast.torch as dr
+import tensorrt as trt
 import torch
 import trimesh
 import warp as wp
@@ -13,6 +14,7 @@ from humanoid_arm_skills.utils import matrix_rpy, rpy_matrix
 
 FOUNDATIONPOSE_DIR = os.environ.get('FOUNDATIONPOSE_DIR', os.path.expanduser('~/FoundationPose'))
 sys.path.insert(0, FOUNDATIONPOSE_DIR)
+import estimater  # noqa: E402
 from estimater import FoundationPose, PoseRefinePredictor  # noqa: E402
 
 NEAR = 0.004
@@ -358,14 +360,59 @@ TORCH_INVERSE = torch.linalg.inv
 WARP_CACHE = {'M': None, 'key': None, 'grid': None, 'src_inverse': {}, 'points': {}}
 
 
+def mesh_diameter(model_pts=None, mesh=None, n_sample=1000):
+    # FoundationPose's compute_mesh_diameter without its unused sklearn import
+    ids = np.random.choice(len(model_pts), size=min(n_sample, len(model_pts)), replace=False)
+    pts = model_pts[ids]
+    return np.linalg.norm(pts[None] - pts[:, None], axis=-1).max()
+
+
+class VoxelCloud:
+    # The open3d point cloud FoundationPose builds once at start-up: points and normals averaged per voxel
+    def __init__(self, points, colors=None, normals=None):
+        self.points = np.asarray(points, dtype=np.float64)
+        self.normals = np.zeros_like(self.points) if normals is None else np.asarray(normals, dtype=np.float64)
+
+    def voxel_down_sample(self, size):
+        keys, index = np.unique(np.floor(self.points / size).astype(np.int64), axis=0, return_inverse=True)
+        index = index.reshape(-1)
+        count = np.bincount(index, minlength=len(keys))[:, None]
+        points = np.stack([np.bincount(index, self.points[:, i], len(keys)) for i in range(3)], 1) / count
+        normals = np.stack([np.bincount(index, self.normals[:, i], len(keys)) for i in range(3)], 1) / count
+        return VoxelCloud(points, normals=normals)
+
+
+class TRTRefiner:
+    # Drop-in for FoundationPose's RefineNet: NCHW crops in, the same trans/rot dict out, run on a TensorRT engine
+    def __init__(self, path: str):
+        with open(path, 'rb') as f:
+            self.engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(f.read())
+        self.context = self.engine.create_execution_context()
+
+    def __call__(self, A, B):
+        a = A.permute(0, 2, 3, 1).float().contiguous()
+        b = B.permute(0, 2, 3, 1).float().contiguous()
+        out1 = torch.empty((a.shape[0], 3), device='cuda')
+        out2 = torch.empty((a.shape[0], 3), device='cuda')
+        for name, tensor in (('input1', a), ('input2', b)):
+            self.context.set_input_shape(name, tuple(tensor.shape))
+            self.context.set_tensor_address(name, tensor.data_ptr())
+        self.context.set_tensor_address('output1', out1.data_ptr())
+        self.context.set_tensor_address('output2', out2.data_ptr())
+        self.context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        return {'trans': out1, 'rot': out2}
+
+
 class GripperFoundationPose:
-    def __init__(self, mesh_path: str, iterations: int = REFINE_ITERATIONS):
+    def __init__(self, mesh_path: str, iterations: int = REFINE_ITERATIONS, engine_path: str = ''):
         # Global registration is never used: its rotation grid (and the mycpp extension) is skipped, and scorer=False stops
         # FoundationPose from loading its score network
         FoundationPose.make_rotation_grid = lambda self, *args, **kwargs: None
         # FoundationPose and kornia invert 3x3 crop transforms on the GPU and rebuild the crop grid for every warp
         torch.linalg.inv = torch.inverse = torch.Tensor.inverse = cpu_inverse
         kornia.geometry.transform.warp_perspective = shared_warp_perspective
+        estimater.compute_mesh_diameter = mesh_diameter
+        estimater.toOpen3dCloud = VoxelCloud
         self.mesh = trimesh.load(mesh_path)
         self.glctx = dr.RasterizeCudaContext()
         self.estimator = FoundationPose(
@@ -377,7 +424,9 @@ class GripperFoundationPose:
             glctx=self.glctx, 
             debug=0, debug_dir=os.path.join(FOUNDATIONPOSE_DIR, 'debug')
         )
-        
+        if engine_path:
+            self.estimator.refiner.model = TRTRefiner(engine_path)
+
         # Inverted on the CPU: the Jetson torch build cannot load its CUDA linalg library
         centred = np.linalg.inv(self.estimator.get_tf_to_centered_mesh().cpu().numpy())
         self.to_centred = torch.as_tensor(centred, dtype=torch.float32, device='cuda')

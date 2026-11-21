@@ -24,6 +24,10 @@ from humanoid_arm_skills.utils import matrix_quaternion, matrix_rpy, quaternion_
 COLOR_SYNC = 0.03
 
 
+def stamp_seconds(msg):
+    return msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+
 class GripperPoseEstimator(Node):
     def __init__(self):
         super().__init__('gripper_pose_estimator')
@@ -37,6 +41,8 @@ class GripperPoseEstimator(Node):
         self.declare_parameter('refine_iterations', 2)
         # FoundationPose renders a decimated mesh when this file exists in the package meshes, else the full one
         self.declare_parameter('foundationpose_mesh', '{side}_dex1_closed_6k.STL')
+        # A TensorRT plan of the refiner, built on this machine; empty runs the PyTorch refiner
+        self.declare_parameter('foundationpose_engine', '')
         self.declare_parameter('min_points', 500)
         self.declare_parameter('min_inliers', 0.4)
         self.declare_parameter('tf_timeout', 0.2)
@@ -51,7 +57,7 @@ class GripperPoseEstimator(Node):
             'base_frame': f'{side}_dex1_base_link',
             'estimate_frame': f'{side}_dex1_base_link_estimate',
             'tip_frame': f'{side}_ee',
-            'tip_published': False,
+            'tip': None,
             'logger': self.get_logger().get_child(side),
             'mesh_path': os.path.join(meshes, f'{side}_dex1_closed.STL'),
             'fp_mesh_path': os.path.join(meshes, self.get_parameter('foundationpose_mesh').value.format(side=side)),
@@ -62,13 +68,13 @@ class GripperPoseEstimator(Node):
         self.k = None
         self.k_color = None
         self.colors = collections.deque(maxlen=10)
+        self.depths = collections.deque(maxlen=10)
+        self.last_depth = 0.0
         self.pending = None
         self.wake = threading.Condition()
         self.running = True
 
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
-        self.static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
-        self.static_tips = []         # every tip sent so far: each sendTransform replaces the latched message
         self.create_subscription(CameraInfo, self.get_parameter('camera_info_topic').value, self._camera_info_cb, 1)
         # A one-deep best-effort reader starves on large images under load; _depth_cb already keeps only the newest frame
         self.create_subscription(Image, self.get_parameter('depth_topic').value, self._depth_cb, qos_profile_sensor_data)
@@ -87,11 +93,14 @@ class GripperPoseEstimator(Node):
         self.k_color = np.array(msg.k).reshape(3, 3)
 
     def _color_cb(self, msg):
-        self.colors.append(msg)
+        with self.wake:
+            self.colors.append(msg)
+            self.wake.notify()
 
     def _depth_cb(self, msg):
         with self.wake:
             self.pending = msg
+            self.depths.append(msg)
             self.wake.notify()
 
     # ========== Fit ==========
@@ -101,7 +110,8 @@ class GripperPoseEstimator(Node):
                 mesh = arm['fp_mesh_path'] if os.path.exists(arm['fp_mesh_path']) else arm['mesh_path']
                 if mesh != arm['fp_mesh_path']:
                     arm['logger'].warning(f"{arm['fp_mesh_path']} not found, FoundationPose renders {mesh}")
-                arm['fitter'] = GripperFoundationPose(mesh, self.get_parameter('refine_iterations').value)
+                arm['fitter'] = GripperFoundationPose(mesh, self.get_parameter('refine_iterations').value,
+                                                      self.get_parameter('foundationpose_engine').value)
         else:
             wp.init()
             for arm in self.arms:
@@ -110,13 +120,30 @@ class GripperPoseEstimator(Node):
         self.get_logger().info(f'gripper_pose_estimator: ready ({frames}, {self.method})')
         while self.running:
             with self.wake:
-                while self.pending is None and self.running:
+                while (msg := self._next_depth()) is None and self.running:
                     self.wake.wait(timeout=0.5)
-                msg, self.pending = self.pending, None
             ready = self.k is not None and (self.method != 'foundationpose' or self.k_color is not None)
             if msg is not None and ready:
                 for arm in self.arms:
                     self._fit(arm, msg)
+
+    def _next_depth(self):
+        # FoundationPose takes the newest depth frame whose colour image has arrived: colour reaches the node later
+        if self.method != 'foundationpose':
+            msg, self.pending = self.pending, None
+            return msg
+        for msg in reversed(self.depths):
+            if stamp_seconds(msg) <= self.last_depth:
+                return None
+            if self._color_for(msg) is not None:
+                self.last_depth = stamp_seconds(msg)
+                return msg
+        return None
+
+    def _color_for(self, msg):
+        stamp = stamp_seconds(msg)
+        color = min(list(self.colors), key=lambda c: abs(stamp_seconds(c) - stamp), default=None)
+        return color if color is not None and abs(stamp_seconds(color) - stamp) <= COLOR_SYNC else None
 
     def _fit(self, arm, msg):
         # (1) The method's fit at the image's own stamp: the pose of the gripper base in the camera it was fitted in
@@ -139,10 +166,10 @@ class GripperPoseEstimator(Node):
         p, q = estimate.transform.translation, estimate.transform.rotation
         p.x, p.y, p.z = fit['pose'][:3, 3].tolist()
         q.x, q.y, q.z, q.w = matrix_quaternion(fit['pose'][:3, :3]).tolist()
-        self.tf_broadcaster.sendTransform(estimate)
-
-        if not arm['tip_published']:
-            self._publish_tip(arm)
+        tip = self._tip(arm)
+        if tip is not None:
+            tip.header.stamp = msg.header.stamp
+        self.tf_broadcaster.sendTransform([estimate] if tip is None else [estimate, tip])
 
         rpy = np.degrees(matrix_rpy(fit['correction'][:3, :3]))
         arm['logger'].info(f"offset {np.round(fit['correction'][:3, 3] * 1000, 1)} mm, rpy {np.round(rpy, 1)} deg, "
@@ -161,9 +188,8 @@ class GripperPoseEstimator(Node):
 
     def _fit_foundationpose(self, arm, msg, depth):
         # RGB-D refine in the colour camera from the encoder pose every frame, on the colour image closest to the depth
-        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        color = min(list(self.colors), key=lambda c: abs(c.header.stamp.sec + c.header.stamp.nanosec * 1e-9 - stamp), default=None)
-        if color is None or abs(color.header.stamp.sec + color.header.stamp.nanosec * 1e-9 - stamp) > COLOR_SYNC:
+        color = self._color_for(msg)
+        if color is None:
             return None
         color_frame = color.header.frame_id
         color_from_base = self._lookup(color_frame, arm['base_frame'], msg.header.stamp)
@@ -193,17 +219,16 @@ class GripperPoseEstimator(Node):
         matrix[:3, 3] = [p.x, p.y, p.z]
         return matrix
 
-    def _publish_tip(self, arm):
-        # Publish a static TF between the esitmated gripper base frame and the gripper tip
-        try:
-            tip = self.tf_buffer.lookup_transform(arm['base_frame'], arm['tip_frame'], rclpy.time.Time())
-        except tf2_ros.TransformException:
-            return
-        tip.header.frame_id = arm['estimate_frame']
-        tip.child_frame_id = f"{arm['tip_frame']}_estimate"
-        self.static_tips.append(tip)
-        self.static_broadcaster.sendTransform(self.static_tips)
-        arm['tip_published'] = True
+    def _tip(self, arm):
+        # The tip under the estimate frame, sent with every fit: a once-latched static TF is missed by late subscribers
+        if arm['tip'] is None:
+            try:
+                arm['tip'] = self.tf_buffer.lookup_transform(arm['base_frame'], arm['tip_frame'], rclpy.time.Time())
+            except tf2_ros.TransformException:
+                return None
+            arm['tip'].header.frame_id = arm['estimate_frame']
+            arm['tip'].child_frame_id = f"{arm['tip_frame']}_estimate"
+        return arm['tip']
 
 
 def main(args=None):
