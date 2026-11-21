@@ -32,9 +32,9 @@ ROTATION_GATE = 0.006
 ROTATION_PASSES = 6
 MAX_ROTATION_DEG = 8.0
 MAX_TRANSLATION = 0.03
-# FoundationPose: a ray counts when its depth is not clearly in front of the gripper, and the mesh must be half in view
+# FoundationPose: a ray counts when its depth is not clearly in front of the gripper, and 10% of the mesh must be in view
 OCCLUDED = 0.01
-MIN_IN_VIEW = 0.5
+MIN_IN_VIEW = 0.1
 REFINE_ITERATIONS = 2
 
 NEAR_C = wp.constant(NEAR)
