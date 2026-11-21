@@ -1,9 +1,22 @@
+import json
+import os
 import struct
+import sys
 
+import kornia
 import numpy as np
+import nvdiffrast.torch as dr
+import tensorrt as trt
+import torch
+import trimesh
 import warp as wp
 
 from humanoid_arm_skills.utils import matrix_rpy, rpy_matrix
+
+FOUNDATIONPOSE_DIR = os.environ.get('FOUNDATIONPOSE_DIR', os.path.expanduser('~/FoundationPose'))
+sys.path.insert(0, FOUNDATIONPOSE_DIR)
+import estimater  # noqa: E402
+from estimater import FoundationPose, PoseRefinePredictor  # noqa: E402
 
 NEAR = 0.004
 FIRST_GATE = 0.015
@@ -20,6 +33,12 @@ ROTATION_GATE = 0.006
 ROTATION_PASSES = 6
 MAX_ROTATION_DEG = 8.0
 MAX_TRANSLATION = 0.03
+# FoundationPose: a ray counts when its depth is not clearly in front of the gripper, and 10% of the mesh must be in view
+OCCLUDED = 0.01
+MIN_IN_VIEW = 0.1
+REFINE_ITERATIONS = 2
+# NVIDIA's NGC refiner, the source of the TensorRT plan; the asset stage puts it beside the weights
+REFINE_ONNX = os.path.join(FOUNDATIONPOSE_DIR, 'weights', 'refine_model.onnx')
 
 NEAR_C = wp.constant(NEAR)
 ROTATION_GATE_C = wp.constant(ROTATION_GATE)
@@ -281,3 +300,217 @@ class GripperFit:
             wp.launch(median_step_kernel, dim=(n, 3), inputs=[hist, count, state])
             wp.launch(gate_kernel, dim=n, inputs=[state, SHRINK])
         return count
+
+
+def register_depth(depth_m: torch.Tensor, k_depth: np.ndarray, color_from_depth: np.ndarray, k_color: np.ndarray,
+                   shape: tuple) -> torch.Tensor:
+    # Every depth pixel moved into the colour camera, keeping the nearest point where several land on one pixel
+    v, u = torch.nonzero(depth_m > 0, as_tuple=True)
+    z = depth_m[v, u]
+    p = torch.stack([(u + 0.5 - k_depth[0, 2]) * z / k_depth[0, 0], (v + 0.5 - k_depth[1, 2]) * z / k_depth[1, 1], z], 1)
+    p = p @ torch.as_tensor(color_from_depth[:3, :3].T, dtype=p.dtype, device=p.device) + \
+        torch.as_tensor(color_from_depth[:3, 3], dtype=p.dtype, device=p.device)
+    uc = torch.floor(k_color[0, 0] * p[:, 0] / p[:, 2] + k_color[0, 2]).long()
+    vc = torch.floor(k_color[1, 1] * p[:, 1] / p[:, 2] + k_color[1, 2]).long()
+    ok = (uc >= 0) & (uc < shape[1]) & (vc >= 0) & (vc < shape[0]) & (p[:, 2] > 0.05)
+    out = torch.full((shape[0] * shape[1],), float('inf'), device=p.device)
+    out.scatter_reduce_(0, vc[ok] * shape[1] + uc[ok], p[ok, 2], reduce='amin')
+    out[torch.isinf(out)] = 0
+    return out.reshape(shape)
+
+
+def cpu_inverse(x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+    # The Jetson torch build cannot load its CUDA linalg library, so GPU matrices are inverted on the CPU
+    return TORCH_INVERSE(x.cpu(), *args, **kwargs).to(x.device) if x.is_cuda else TORCH_INVERSE(x, *args, **kwargs)
+
+
+def normal_transform(height: int, width: int, like: torch.Tensor) -> torch.Tensor:
+    # kornia's normal_transform_pixel: pixel coordinates to [-1, 1] over (size - 1)
+    m = torch.eye(3, dtype=like.dtype, device=like.device)
+    m[0, 0], m[0, 2] = 2.0 / max(width - 1, 1e-14), -1.0
+    m[1, 1], m[1, 2] = 2.0 / max(height - 1, 1e-14), -1.0
+    return m
+
+
+def shared_warp_perspective(src: torch.Tensor, M: torch.Tensor, dsize: tuple, mode: str = 'bilinear',
+                            padding_mode: str = 'zeros', align_corners: bool = True, fill_value=None) -> torch.Tensor:
+    # kornia's warp_perspective math, with the sampling grid built once per crop transform: the colour and XYZ crops
+    # of one refinement share M, so the second warp only samples
+    h, w = src.shape[-2:]
+    h_out, w_out = dsize
+    key = (h, w, h_out, w_out, src.dtype, src.device)
+    if WARP_CACHE['M'] is not M or WARP_CACHE['key'] != key:
+        Ms = M.to(src.dtype)
+        if key[:2] + key[4:] not in WARP_CACHE['src_inverse']:
+            WARP_CACHE['src_inverse'][key[:2] + key[4:]] = cpu_inverse(normal_transform(h, w, Ms))
+        if key[2:] not in WARP_CACHE['points']:
+            ys = torch.linspace(-1, 1, h_out, device=src.device, dtype=src.dtype)
+            xs = torch.linspace(-1, 1, w_out, device=src.device, dtype=src.dtype)
+            gy, gx = torch.meshgrid(ys, xs, indexing='ij')
+            WARP_CACHE['points'][key[2:]] = (torch.stack([gx, gy, torch.ones_like(gx)], -1).reshape(1, -1, 3),
+                                             normal_transform(h_out, w_out, Ms))
+        points, dst_normal = WARP_CACHE['points'][key[2:]]
+        src_from_dst = cpu_inverse(dst_normal @ Ms @ WARP_CACHE['src_inverse'][key[:2] + key[4:]])
+        mapped = points @ src_from_dst.transpose(-1, -2)
+        z = mapped[..., 2:3]
+        scale = torch.where(z.abs() > 1e-8, 1.0 / (z + 1e-8), torch.ones_like(z))
+        WARP_CACHE.update(M=M, key=key, grid=(mapped[..., :2] * scale).reshape(-1, h_out, w_out, 2))
+    return torch.nn.functional.grid_sample(src, WARP_CACHE['grid'], mode=mode, padding_mode=padding_mode,
+                                           align_corners=align_corners)
+
+
+TORCH_INVERSE = torch.linalg.inv
+WARP_CACHE = {'M': None, 'key': None, 'grid': None, 'src_inverse': {}, 'points': {}}
+
+
+def mesh_diameter(model_pts=None, mesh=None, n_sample=1000):
+    # FoundationPose's compute_mesh_diameter without its unused sklearn import
+    ids = np.random.choice(len(model_pts), size=min(n_sample, len(model_pts)), replace=False)
+    pts = model_pts[ids]
+    return np.linalg.norm(pts[None] - pts[:, None], axis=-1).max()
+
+
+class VoxelCloud:
+    # The open3d point cloud FoundationPose builds once at start-up: points and normals averaged per voxel
+    def __init__(self, points, colors=None, normals=None):
+        self.points = np.asarray(points, dtype=np.float64)
+        self.normals = np.zeros_like(self.points) if normals is None else np.asarray(normals, dtype=np.float64)
+
+    def voxel_down_sample(self, size):
+        keys, index = np.unique(np.floor(self.points / size).astype(np.int64), axis=0, return_inverse=True)
+        index = index.reshape(-1)
+        count = np.bincount(index, minlength=len(keys))[:, None]
+        points = np.stack([np.bincount(index, self.points[:, i], len(keys)) for i in range(3)], 1) / count
+        normals = np.stack([np.bincount(index, self.normals[:, i], len(keys)) for i in range(3)], 1) / count
+        return VoxelCloud(points, normals=normals)
+
+
+def plan_runtime() -> dict:
+    return {'tensorrt': trt.__version__, 'device': torch.cuda.get_device_name(0)}
+
+
+def plan_unusable(plan_path: str) -> str | None:
+    # A plan runs only on the TensorRT version and GPU it was built for: the json beside it names them
+    meta_path = plan_path + '.json'
+    if not os.path.exists(plan_path) or not os.path.exists(meta_path):
+        return f'no TensorRT plan at {plan_path}'
+    with open(meta_path) as f:
+        meta = json.load(f)
+    if meta != plan_runtime():
+        return f'{plan_path} was built for {meta}, this is {plan_runtime()}'
+    return None
+
+
+def build_plan(plan_path: str, onnx_path: str = REFINE_ONNX) -> None:
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(0)
+    parser = trt.OnnxParser(network, logger)
+    if not parser.parse_from_file(onnx_path):
+        raise RuntimeError('\n'.join(str(parser.get_error(i)) for i in range(parser.num_errors)))
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+    config.set_flag(trt.BuilderFlag.FP16)
+    profile = builder.create_optimization_profile()
+    for name in ('input1', 'input2'):
+        profile.set_shape(name, (1, 160, 160, 6), (1, 160, 160, 6), (2, 160, 160, 6))
+    config.add_optimization_profile(profile)
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError(f'TensorRT could not build a plan from {onnx_path}')
+    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
+    with open(plan_path, 'wb') as f:
+        f.write(plan)
+    with open(plan_path + '.json', 'w') as f:
+        json.dump(plan_runtime(), f)
+
+
+class TRTRefiner:
+    # Drop-in for FoundationPose's RefineNet: NCHW crops in, the same trans/rot dict out, run on a TensorRT engine
+    def __init__(self, path: str):
+        with open(path, 'rb') as f:
+            self.engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(f.read())
+        self.context = self.engine.create_execution_context()
+
+    def __call__(self, A, B):
+        a = A.permute(0, 2, 3, 1).float().contiguous()
+        b = B.permute(0, 2, 3, 1).float().contiguous()
+        out1 = torch.empty((a.shape[0], 3), device='cuda')
+        out2 = torch.empty((a.shape[0], 3), device='cuda')
+        for name, tensor in (('input1', a), ('input2', b)):
+            self.context.set_input_shape(name, tuple(tensor.shape))
+            self.context.set_tensor_address(name, tensor.data_ptr())
+        self.context.set_tensor_address('output1', out1.data_ptr())
+        self.context.set_tensor_address('output2', out2.data_ptr())
+        self.context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        return {'trans': out1, 'rot': out2}
+
+
+class GripperFoundationPose:
+    def __init__(self, mesh_path: str, iterations: int = REFINE_ITERATIONS, engine_path: str = ''):
+        # Global registration is never used: its rotation grid (and the mycpp extension) is skipped, and scorer=False stops
+        # FoundationPose from loading its score network
+        FoundationPose.make_rotation_grid = lambda self, *args, **kwargs: None
+        # FoundationPose and kornia invert 3x3 crop transforms on the GPU and rebuild the crop grid for every warp
+        torch.linalg.inv = torch.inverse = torch.Tensor.inverse = cpu_inverse
+        kornia.geometry.transform.warp_perspective = shared_warp_perspective
+        estimater.compute_mesh_diameter = mesh_diameter
+        estimater.toOpen3dCloud = VoxelCloud
+        self.mesh = trimesh.load(mesh_path)
+        self.glctx = dr.RasterizeCudaContext()
+        self.estimator = FoundationPose(
+            model_pts=self.mesh.vertices, 
+            model_normals=self.mesh.vertex_normals, 
+            mesh=self.mesh,
+            scorer=False, 
+            refiner=PoseRefinePredictor(), 
+            glctx=self.glctx, 
+            debug=0, debug_dir=os.path.join(FOUNDATIONPOSE_DIR, 'debug')
+        )
+        if engine_path:
+            self.estimator.refiner.model = TRTRefiner(engine_path)
+
+        # Inverted on the CPU: the Jetson torch build cannot load its CUDA linalg library
+        centred = np.linalg.inv(self.estimator.get_tf_to_centered_mesh().cpu().numpy())
+        self.to_centred = torch.as_tensor(centred, dtype=torch.float32, device='cuda')
+        self.iterations = iterations
+        self.vertices = torch.as_tensor(self.mesh.vertices, dtype=torch.float32, device='cuda')
+        self.faces = torch.as_tensor(self.mesh.faces, dtype=torch.int32, device='cuda')
+
+    def in_view(self, k: np.ndarray, pose: np.ndarray, shape: tuple) -> float:
+        p = self.mesh.vertices @ pose[:3, :3].T + pose[:3, 3]
+        u, v = k[0, 0] * p[:, 0] / p[:, 2] + k[0, 2], k[1, 1] * p[:, 1] / p[:, 2] + k[1, 2]
+        return float(np.mean((p[:, 2] > 0) & (u >= 0) & (u < shape[1]) & (v >= 0) & (v < shape[0])))
+
+    def render_depth(self, pose: np.ndarray, k: np.ndarray, shape: tuple) -> torch.Tensor:
+        h, w = shape
+        r = torch.as_tensor(pose[:3, :3].T, dtype=torch.float32, device='cuda')
+        p = self.vertices @ r + torch.as_tensor(pose[:3, 3], dtype=torch.float32, device='cuda')
+        x = (k[0, 0] * p[:, 0] / p[:, 2] + k[0, 2]) / w * 2 - 1
+        y = (k[1, 1] * p[:, 1] / p[:, 2] + k[1, 2]) / h * 2 - 1
+        near, far = 0.05, 3.0
+        z = (far + near) / (far - near) - 2 * far * near / ((far - near) * p[:, 2])
+        clip = torch.stack([x * p[:, 2], y * p[:, 2], z * p[:, 2], p[:, 2]], 1)[None]
+        rast, _ = dr.rasterize(self.glctx, clip, self.faces, resolution=[h, w])
+        depth, _ = dr.interpolate(p[None, :, 2:3].contiguous(), rast, self.faces)
+        return depth[0, :, :, 0] * (rast[0, :, :, 3] > 0)
+
+    def score(self, pose: np.ndarray, k: np.ndarray, depth: torch.Tensor) -> tuple:
+        # Visible rays only: a ray is skipped when depth is missing or something sits clearly in front of the gripper
+        rendered = self.render_depth(pose, k, depth.shape)
+        diff = depth - rendered
+        judged = (rendered > 0) & (depth > 0) & (diff > -OCCLUDED)
+        rays = int(judged.sum())
+        return float((judged & (diff.abs() < NEAR)).sum()) / max(rays, 1), rays
+
+    def fit(self, rgb: np.ndarray, depth_mm: np.ndarray, k_depth: np.ndarray, color_from_depth: np.ndarray,
+            k_color: np.ndarray, color_from_base: np.ndarray) -> dict | None:
+        # rgb and k_color share one resolution; the pose is the gripper base in the colour camera, seeded from the encoder
+        if self.in_view(k_color, color_from_base, rgb.shape[:2]) < MIN_IN_VIEW:
+            return None
+        depth = register_depth(torch.as_tensor(depth_mm.astype(np.float32) / 1000.0, device='cuda'), k_depth,
+                               color_from_depth, k_color, rgb.shape[:2])
+        self.estimator.pose_last = torch.as_tensor(color_from_base, dtype=torch.float32, device='cuda') @ self.to_centred
+        pose = self.estimator.track_one(rgb=rgb, depth=depth.cpu().numpy(), K=k_color, iteration=self.iterations)
+        inliers, rays = self.score(pose, k_color, depth)
+        return dict(pose=pose, correction=np.linalg.inv(color_from_base) @ pose, inliers=inliers, points=rays)
