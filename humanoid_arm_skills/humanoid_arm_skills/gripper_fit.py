@@ -1,3 +1,4 @@
+import json
 import os
 import struct
 import sys
@@ -36,6 +37,8 @@ MAX_TRANSLATION = 0.03
 OCCLUDED = 0.01
 MIN_IN_VIEW = 0.1
 REFINE_ITERATIONS = 2
+# NVIDIA's NGC refiner, the source of the TensorRT plan; the asset stage puts it beside the weights
+REFINE_ONNX = os.path.join(FOUNDATIONPOSE_DIR, 'weights', 'refine_model.onnx')
 
 NEAR_C = wp.constant(NEAR)
 ROTATION_GATE_C = wp.constant(ROTATION_GATE)
@@ -380,6 +383,46 @@ class VoxelCloud:
         points = np.stack([np.bincount(index, self.points[:, i], len(keys)) for i in range(3)], 1) / count
         normals = np.stack([np.bincount(index, self.normals[:, i], len(keys)) for i in range(3)], 1) / count
         return VoxelCloud(points, normals=normals)
+
+
+def plan_runtime() -> dict:
+    return {'tensorrt': trt.__version__, 'device': torch.cuda.get_device_name(0)}
+
+
+def plan_unusable(plan_path: str) -> str | None:
+    # A plan runs only on the TensorRT version and GPU it was built for: the json beside it names them
+    meta_path = plan_path + '.json'
+    if not os.path.exists(plan_path) or not os.path.exists(meta_path):
+        return f'no TensorRT plan at {plan_path}'
+    with open(meta_path) as f:
+        meta = json.load(f)
+    if meta != plan_runtime():
+        return f'{plan_path} was built for {meta}, this is {plan_runtime()}'
+    return None
+
+
+def build_plan(plan_path: str, onnx_path: str = REFINE_ONNX) -> None:
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(0)
+    parser = trt.OnnxParser(network, logger)
+    if not parser.parse_from_file(onnx_path):
+        raise RuntimeError('\n'.join(str(parser.get_error(i)) for i in range(parser.num_errors)))
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+    config.set_flag(trt.BuilderFlag.FP16)
+    profile = builder.create_optimization_profile()
+    for name in ('input1', 'input2'):
+        profile.set_shape(name, (1, 160, 160, 6), (1, 160, 160, 6), (2, 160, 160, 6))
+    config.add_optimization_profile(profile)
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError(f'TensorRT could not build a plan from {onnx_path}')
+    os.makedirs(os.path.dirname(plan_path), exist_ok=True)
+    with open(plan_path, 'wb') as f:
+        f.write(plan)
+    with open(plan_path + '.json', 'w') as f:
+        json.dump(plan_runtime(), f)
 
 
 class TRTRefiner:

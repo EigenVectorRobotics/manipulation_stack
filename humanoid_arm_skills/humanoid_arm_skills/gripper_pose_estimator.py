@@ -18,7 +18,7 @@ from sensor_msgs.msg import CameraInfo, Image
 
 import tf2_ros
 
-from humanoid_arm_skills.gripper_fit import GripperFit, GripperFoundationPose
+from humanoid_arm_skills.gripper_fit import GripperFit, GripperFoundationPose, build_plan, plan_unusable
 from humanoid_arm_skills.utils import matrix_quaternion, matrix_rpy, quaternion_matrix
 
 COLOR_SYNC = 0.03
@@ -106,6 +106,12 @@ class GripperPoseEstimator(Node):
     # ========== Fit ==========
     def _work(self):
         if self.method == 'foundationpose':
+            plan = self.get_parameter('foundationpose_engine').value
+            reason = plan_unusable(plan) if plan else None
+            if reason:
+                self.get_logger().warning(f'{reason}: building it from the refiner ONNX (about a minute)')
+                build_plan(plan)
+                self.get_logger().info(f'built {plan}')
             for arm in self.arms:
                 mesh = arm['fp_mesh_path'] if os.path.exists(arm['fp_mesh_path']) else arm['mesh_path']
                 if mesh != arm['fp_mesh_path']:
